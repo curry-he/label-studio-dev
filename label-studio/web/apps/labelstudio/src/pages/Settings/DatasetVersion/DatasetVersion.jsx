@@ -8,6 +8,255 @@ import { modal } from "../../../components/Modal/Modal";
 import { ImportPage } from "../../CreateProject/Import/Import";
 import { useImportPage } from "../../CreateProject/Import/useImportPage";
 
+// Available preprocessing options
+const PREPROCESSING_OPTIONS = {
+  "auto_orient": {
+    name: "Auto-Orient",
+    description: "Automatically adjusts image orientation based on EXIF data.",
+    params: []
+  },
+  "resize": {
+    name: "Resize",
+    description: "Resize the image to a specific size.",
+    params: [
+      { name: "width", type: "number", default: 640, label: "Width" },
+      { name: "height", type: "number", default: 640, label: "Height" }
+    ]
+  }
+};
+
+// Available augmentation options
+const AUGMENTATION_OPTIONS = {
+  "flip": {
+    name: "Flip",
+    description: "Flip the image horizontally or vertically.",
+    params: [
+      { name: "direction", type: "select", default: "horizontal", options: ["horizontal", "vertical"], label: "Direction" }
+    ]
+  },
+  "rotate": {
+    name: "Rotate",
+    description: "Rotate the image by a certain angle.",
+    params: [
+      { name: "angle", type: "number", default: 90, label: "Angle (degrees)" }
+    ]
+  }
+};
+
+// Component for adding preprocessing steps
+const AddPreprocessingStepModal = ({ onCancel, onAdd }) => {
+  const [selectedStep, setSelectedStep] = useState("");
+  const [params, setParams] = useState({});
+
+  const handleStepSelect = (stepKey) => {
+    setSelectedStep(stepKey);
+    const defaultParams = {};
+    PREPROCESSING_OPTIONS[stepKey]?.params?.forEach(param => {
+      defaultParams[param.name] = param.default;
+    });
+    setParams(defaultParams);
+  };
+
+  const handleParamChange = (paramName, value) => {
+    setParams(prev => ({
+      ...prev,
+      [paramName]: value
+    }));
+  };
+
+  const handleAdd = () => {
+    if (selectedStep) {
+      onAdd({
+        type: selectedStep,
+        name: PREPROCESSING_OPTIONS[selectedStep].name,
+        params: params
+      });
+    }
+  };
+
+  return (
+    <div className={styles['step-modal']}>
+      <h3>Add Preprocessing Step</h3>
+      <div className={styles['step-modal__field']}>
+        <label>Select Preprocessing Step:</label>
+        <select
+          value={selectedStep}
+          onChange={(e) => handleStepSelect(e.target.value)}
+        >
+          <option value="">Choose a preprocessing step...</option>
+          {Object.entries(PREPROCESSING_OPTIONS).map(([key, option]) => (
+            <option key={key} value={key}>{option.name}</option>
+          ))}
+        </select>
+      </div>
+
+      {selectedStep && (
+        <div>
+          <p className={styles['step-modal__description']}>
+            {PREPROCESSING_OPTIONS[selectedStep].description}
+          </p>
+
+          {PREPROCESSING_OPTIONS[selectedStep].params?.map(param => (
+            <div key={param.name} className={styles['step-modal__field']}>
+              <label>{param.label}:</label>
+              {param.type === 'number' ? (
+                <input
+                  type="number"
+                  value={params[param.name] || param.default}
+                  onChange={(e) => handleParamChange(param.name, parseInt(e.target.value))}
+                />
+              ) : param.type === 'select' ? (
+                <select
+                  value={params[param.name] || param.default}
+                  onChange={(e) => handleParamChange(param.name, e.target.value)}
+                >
+                  {param.options.map(option => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={params[param.name] || param.default}
+                  onChange={(e) => handleParamChange(param.name, e.target.value)}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className={styles['step-modal__actions']}>
+        <Button onClick={onCancel}>Cancel</Button>
+        <Button onClick={handleAdd} primary disabled={!selectedStep}>
+          Add Step
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+// Component for adding augmentation steps
+const AddAugmentationStepModal = ({ onCancel, onAdd }) => {
+  const [selectedStep, setSelectedStep] = useState("");
+  const [params, setParams] = useState({});
+
+  const handleStepSelect = (stepKey) => {
+    setSelectedStep(stepKey);
+    const defaultParams = {};
+    AUGMENTATION_OPTIONS[stepKey]?.params?.forEach(param => {
+      defaultParams[param.name] = param.default;
+    });
+    setParams(defaultParams);
+  };
+
+  const handleParamChange = (paramName, value) => {
+    setParams(prev => ({
+      ...prev,
+      [paramName]: value
+    }));
+  };
+
+  const handleAdd = () => {
+    if (selectedStep) {
+      onAdd({
+        type: selectedStep,
+        name: AUGMENTATION_OPTIONS[selectedStep].name,
+        params: params
+      });
+    }
+  };
+
+  return (
+    <div className={styles['step-modal']}>
+      <h3>Add Augmentation Step</h3>
+      <div className={styles['step-modal__field']}>
+        <label>Select Augmentation Step:</label>
+        <select
+          value={selectedStep}
+          onChange={(e) => handleStepSelect(e.target.value)}
+        >
+          <option value="">Choose an augmentation step...</option>
+          {Object.entries(AUGMENTATION_OPTIONS).map(([key, option]) => (
+            <option key={key} value={key}>{option.name}</option>
+          ))}
+        </select>
+      </div>
+
+      {selectedStep && (
+        <div>
+          <p className={styles['step-modal__description']}>
+            {AUGMENTATION_OPTIONS[selectedStep].description}
+          </p>
+
+          {AUGMENTATION_OPTIONS[selectedStep].params?.map(param => (
+            <div key={param.name} className={styles['step-modal__field']}>
+              <label>{param.label}:</label>
+              {param.type === 'number' ? (
+                <input
+                  type="number"
+                  value={params[param.name] || param.default}
+                  onChange={(e) => handleParamChange(param.name, parseInt(e.target.value))}
+                />
+              ) : param.type === 'select' ? (
+                <select
+                  value={params[param.name] || param.default}
+                  onChange={(e) => handleParamChange(param.name, e.target.value)}
+                >
+                  {param.options.map(option => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={params[param.name] || param.default}
+                  onChange={(e) => handleParamChange(param.name, e.target.value)}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className={styles['step-modal__actions']}>
+        <Button onClick={onCancel}>Cancel</Button>
+        <Button onClick={handleAdd} primary disabled={!selectedStep}>
+          Add Step
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+// Component for displaying preprocessing steps
+const PreprocessingStepCard = ({ step, onEdit, onRemove }) => {
+  return (
+    <div className={styles['preprocessing-step-card']}>
+      <div className={styles['preprocessing-step-card__header']}>
+        <div>
+          <h4 className={styles['preprocessing-step-card__title']}>
+            {step.name}
+          </h4>
+          {step.params && Object.keys(step.params).length > 0 && (
+            <div className={styles['preprocessing-step-card__params']}>
+              {Object.entries(step.params).map(([key, value]) => (
+                <span key={key}>
+                  {key}: <strong>{value}</strong>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className={styles['preprocessing-step-card__actions']}>
+          <Button size="small" onClick={() => onEdit(step)}>Edit</Button>
+          <Button size="small" onClick={() => onRemove(step)} style={{ color: '#dc3545' }}>×</Button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const AddMoreImagesModal = ({ onCancel, onFinish, pageProps, uploading, project }) => {
   const [sample, setSample] = useState(null);
 
@@ -157,6 +406,8 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
   const [rebalanceLoading, setRebalanceLoading] = useState(false);
   const [splitConfig, setSplitConfig] = useState({ train: 70, valid: 20, test: 10 });
   const [currentProject, setCurrentProject] = useState(project);
+  const [preprocessingSteps, setPreprocessingSteps] = useState([]);
+  const [augmentationSteps, setAugmentationSteps] = useState([]);
 
   // 当project prop更新时，同步更新本地状态
   useEffect(() => {
@@ -176,8 +427,8 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
       project: projectId,
       name: versionName,
       version: `v${versions.length + 1}`,
-      preprocessing_config: {},
-      augmentation_config: {},
+      preprocessing_config: preprocessingSteps,
+      augmentation_config: augmentationSteps,
       split_config: {
         train_percent: splitConfig.train / 100,
         validation_percent: splitConfig.valid / 100,
@@ -191,6 +442,68 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
     if (newVersion) {
       onVersionCreated(newVersion);
     }
+  };
+
+  // Preprocessing step handlers
+  const handleAddPreprocessingStep = (step) => {
+    setPreprocessingSteps(prev => [...prev, { ...step, id: Date.now() }]);
+  };
+
+  const handleEditPreprocessingStep = (step) => {
+    // TODO: Implement edit functionality
+    console.log("Edit preprocessing step:", step);
+  };
+
+  const handleRemovePreprocessingStep = (stepToRemove) => {
+    setPreprocessingSteps(prev => prev.filter(step => step.id !== stepToRemove.id));
+  };
+
+  const handleAddPreprocessingStepClick = () => {
+    const modalRef = modal({
+      title: "Add Preprocessing Step",
+      body: (
+        <AddPreprocessingStepModal
+          onCancel={() => modalRef.close()}
+          onAdd={(step) => {
+            handleAddPreprocessingStep(step);
+            modalRef.close();
+          }}
+        />
+      ),
+      style: { width: "600px", height: "auto", maxWidth: "90vw" },
+      bare: true,
+    });
+  };
+
+  // Augmentation step handlers
+  const handleAddAugmentationStep = (step) => {
+    setAugmentationSteps(prev => [...prev, { ...step, id: Date.now() }]);
+  };
+
+  const handleEditAugmentationStep = (step) => {
+    // TODO: Implement edit functionality
+    console.log("Edit augmentation step:", step);
+  };
+
+  const handleRemoveAugmentationStep = (stepToRemove) => {
+    setAugmentationSteps(prev => prev.filter(step => step.id !== stepToRemove.id));
+  };
+
+  const handleAddAugmentationStepClick = () => {
+    const modalRef = modal({
+      title: "Add Augmentation Step",
+      body: (
+        <AddAugmentationStepModal
+          onCancel={() => modalRef.close()}
+          onAdd={(step) => {
+            handleAddAugmentationStep(step);
+            modalRef.close();
+          }}
+        />
+      ),
+      style: { width: "600px", height: "auto", maxWidth: "90vw" },
+      bare: true,
+    });
   };
 
   const handleAddMoreImages = () => {
@@ -358,16 +671,69 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
                 })()}
                 {step.id === 3 && (
                   <>
-                    <p>Decrease training time and increase performance by applying image transformations to all images in this dataset.</p>
-                    <Button>Add Preprocessing Step</Button>
-                    <Button onClick={() => setActiveStep(4)} primary style={{ marginTop: 20, marginLeft: 10 }}>Continue</Button>
+                    <div style={{ marginBottom: '20px' }}>
+                      <p style={{ color: '#666', fontSize: '14px', marginBottom: '15px' }}>
+                        What are preprocessing steps?
+                      </p>
+                      <p style={{ marginBottom: '20px' }}>
+                        Decrease training time and increase performance by applying image transformations to all images in this dataset.
+                      </p>
+                    </div>
+
+                    {/* Display existing preprocessing steps */}
+                    {preprocessingSteps.length > 0 && (
+                      <div style={{ marginBottom: '20px' }}>
+                        {preprocessingSteps.map((step) => (
+                          <PreprocessingStepCard
+                            key={step.id}
+                            step={step}
+                            onEdit={handleEditPreprocessingStep}
+                            onRemove={handleRemovePreprocessingStep}
+                          />
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Add preprocessing step button */}
+                    <Button onClick={handleAddPreprocessingStepClick}>
+                      + Add Preprocessing Step
+                    </Button>
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <Button onClick={() => setActiveStep(4)} primary>Continue</Button>
+                    </div>
                   </>
                 )}
                 {step.id === 4 && (
                   <>
-                    <p>Create new training examples for your model to learn from by generating augmented versions of each image in your training set.</p>
-                    <Button>Add Augmentation Step</Button>
-                    <Button onClick={() => setActiveStep(5)} primary style={{ marginTop: 20, marginLeft: 10 }}>Continue</Button>
+                    <div style={{ marginBottom: '20px' }}>
+                      <p style={{ marginBottom: '20px' }}>
+                        Create new training examples for your model to learn from by generating augmented versions of each image in your training set.
+                      </p>
+                    </div>
+
+                    {/* Display existing augmentation steps */}
+                    {augmentationSteps.length > 0 && (
+                      <div style={{ marginBottom: '20px' }}>
+                        {augmentationSteps.map((step) => (
+                          <PreprocessingStepCard
+                            key={step.id}
+                            step={step}
+                            onEdit={handleEditAugmentationStep}
+                            onRemove={handleRemoveAugmentationStep}
+                          />
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Add augmentation step button */}
+                    <Button onClick={handleAddAugmentationStepClick}>
+                      + Add Augmentation Step
+                    </Button>
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <Button onClick={() => setActiveStep(5)} primary>Continue</Button>
+                    </div>
                   </>
                 )}
                 {step.id === 5 && (

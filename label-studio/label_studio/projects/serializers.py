@@ -33,7 +33,7 @@ from rest_framework import serializers
 from rest_framework.serializers import SerializerMethodField
 from tasks.models import Task
 from users.serializers import UserSimpleSerializer
-from .models import DatasetVersion, VersionTask
+from .models import DatasetVersion, VersionTask, ProcessedTask
 
 
 class CreatedByFromContext:
@@ -431,7 +431,10 @@ class DatasetVersionSerializer(serializers.ModelSerializer):
             'augmentation_config',
             'split_stats',
             'task_count',
+            'status',
         ]
+        read_only_fields = ('status', 'created_by')
+
 
     def get_task_count(self, obj):
         return VersionTask.objects.filter(version=obj).count()
@@ -450,4 +453,10 @@ class DatasetVersionSerializer(serializers.ModelSerializer):
 class VersionTaskSerializer(serializers.ModelSerializer):
     class Meta:
         model = VersionTask
+        fields = '__all__'
+
+
+class ProcessedTaskSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProcessedTask
         fields = '__all__'

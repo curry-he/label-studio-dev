@@ -27,7 +27,16 @@ from ml.serializers import MLBackendSerializer
 from projects.functions.next_task import get_next_task
 from projects.functions.stream_history import get_label_stream_history
 from projects.functions.utils import recalculate_created_annotations_and_labels_from_scratch
-from projects.models import Project, ProjectImport, ProjectManager, ProjectReimport, ProjectSummary, DatasetVersion, VersionTask
+from projects.models import (
+    Project,
+    ProjectImport,
+    ProjectManager,
+    ProjectReimport,
+    ProjectSummary,
+    DatasetVersion,
+    VersionTask,
+    ProcessedTask,
+)
 from projects.serializers import (
     GetFieldsSerializer,
     ProjectCountsSerializer,
@@ -914,28 +923,13 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
+        from .tasks import process_version_creation
         project = serializer.validated_data['project']
-        preprocessing_config = serializer.validated_data.get('preprocessing_config', {})
-        augmentation_config = serializer.validated_data.get('augmentation_config', {})
-        split_config = serializer.validated_data.get('split_config', {})
-
         version = serializer.save(
             created_by=self.request.user,
-            preprocessing_config=preprocessing_config,
-            augmentation_config=augmentation_config,
-            split_config=split_config
+            status=DatasetVersion.Status.CREATED
         )
-
-        if split_config:
-            # If split_config is provided, use it to split tasks
-            split_tasks_for_version(version, split_config)
-        else:
-            # Otherwise, assign all tasks to 'train' subset
-            tasks = Task.objects.filter(project=project)
-            version_tasks = []
-            for task in tasks:
-                version_tasks.append(VersionTask(version=version, task=task, subset='train'))
-            VersionTask.objects.bulk_create(version_tasks)
+        start_job_async_or_sync(process_version_creation, version.id)
 
     @swagger_auto_schema(
         tags=['Dataset Versions'],
@@ -981,6 +975,23 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
         version.save()
         
         return Response({'status': 'Tasks split successfully'}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='available-transforms')
+    def available_transforms(self, request, *args, **kwargs):
+        from data_transforms.preprocessing import AVAILABLE_PREPROCESSING
+        from data_transforms.augmentation import AVAILABLE_AUGMENTATION
+
+        # We don't want to send the function object in the response
+        def clean_config(config):
+            return {
+                name: {k: v for k, v in details.items() if k != 'function'}
+                for name, details in config.items()
+            }
+
+        return Response({
+            'preprocessing': clean_config(AVAILABLE_PREPROCESSING),
+            'augmentation': clean_config(AVAILABLE_AUGMENTATION)
+        })
 
 
 def split_tasks_for_version(version, split_config):

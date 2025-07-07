@@ -1527,6 +1527,12 @@ class ProjectReimport(models.Model):
 
 
 class DatasetVersion(models.Model):
+    class Status(models.TextChoices):
+        CREATED = 'created', _('Created')
+        PROCESSING = 'processing', _('Processing')
+        COMPLETED = 'completed', _('Completed')
+        FAILED = 'failed', _('Failed')
+
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='versions')
     name = models.CharField(max_length=256)
     version = models.CharField(max_length=32)
@@ -1535,6 +1541,9 @@ class DatasetVersion(models.Model):
     preprocessing_config = models.JSONField(default=dict, blank=True)
     split_config = models.JSONField(default=dict, blank=True)
     augmentation_config = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        _('status'), max_length=64, choices=Status.choices, default=Status.CREATED
+    )
 
     def __str__(self):
         return f"{self.project.title} - {self.name} ({self.version})"
@@ -1550,3 +1559,13 @@ class VersionTask(models.Model):
 
     def __str__(self):
         return f"{self.version} - {self.task} ({self.subset})"
+
+
+class ProcessedTask(models.Model):
+    original_task = models.ForeignKey('tasks.Task', on_delete=models.CASCADE, related_name='processed_tasks')
+    version = models.ForeignKey(DatasetVersion, on_delete=models.CASCADE, related_name='processed_tasks')
+    processed_data = models.FileField(upload_to='processed_tasks/')
+    processed_annotations = models.JSONField(default=dict)
+
+    def __str__(self):
+        return f"Processed {self.original_task} for {self.version}"
