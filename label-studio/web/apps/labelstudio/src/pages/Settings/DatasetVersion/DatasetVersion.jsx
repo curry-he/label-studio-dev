@@ -20,7 +20,21 @@ const PREPROCESSING_OPTIONS = {
     description: "Resize the image to a specific size.",
     params: [
       { name: "width", type: "number", default: 640, label: "Width" },
-      { name: "height", type: "number", default: 640, label: "Height" }
+      { name: "height", type: "number", default: 640, label: "Height" },
+      {
+        name: "mode",
+        type: "select",
+        default: "stretch_to",
+        label: "Mode",
+        options: [
+          { value: "stretch_to", label: "Stretch to" },
+          { value: "fit_within", label: "Fit within" },
+          { value: "fill_center_crop", label: "Fill (with center crop) in" },
+          { value: "fit_black_edges", label: "Fit (black edges) in" },
+          { value: "fit_white_edges", label: "Fit (white edges) in" },
+          { value: "fit_reflect_edges", label: "Fit (reflect edges) in" },
+        ]
+      }
     ]
   }
 };
@@ -111,7 +125,11 @@ const AddPreprocessingStepModal = ({ onCancel, onAdd }) => {
                   onChange={(e) => handleParamChange(param.name, e.target.value)}
                 >
                   {param.options.map(option => (
-                    <option key={option} value={option}>{option}</option>
+                    typeof option === 'string' ? (
+                      <option key={option} value={option}>{option}</option>
+                    ) : (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    )
                   ))}
                 </select>
               ) : (
@@ -827,14 +845,52 @@ const VersionDetails = ({ version, project }) => {
 
         <div className={styles['detail-item']}>
           <h3>Preprocessing</h3>
-          <pre>{Object.keys(preprocessing_config).length > 0 ? JSON.stringify(preprocessing_config, null, 2) : 'No preprocessing steps were applied.'}</pre>
+          <div>
+            {preprocessing_config && Array.isArray(preprocessing_config) && preprocessing_config.length > 0 ? (
+              preprocessing_config.map((step, index) => (
+                <p key={index}>
+                  <strong>{step.name}:</strong>{' '}
+                  {step.type === 'auto_orient' && 'Applied'}
+                  {step.type === 'resize' && (
+                    <span>
+                      {
+                        {
+                          stretch_to: "Stretched to",
+                          fit_within: "Fit within",
+                          fill_center_crop: "Filled and cropped to",
+                          fit_black_edges: "Fit with black edges to",
+                          fit_white_edges: "Fit with white edges to",
+                          fit_reflect_edges: "Fit with reflected edges to",
+                        }[step.params.mode] || 'Resized to'
+                      }
+                      {' '}{step.params.width}x{step.params.height}
+                    </span>
+                  )}
+                </p>
+              ))
+            ) : (
+              <p>No preprocessing steps were applied.</p>
+            )}
+          </div>
         </div>
 
         <hr />
 
         <div className={styles['detail-item']}>
           <h3>Augmentations</h3>
-          <pre>{Object.keys(augmentation_config).length > 0 ? JSON.stringify(augmentation_config, null, 2) : 'No augmentations were applied.'}</pre>
+          <div>
+            {augmentation_config && Array.isArray(augmentation_config) && augmentation_config.length > 0 ? (
+              augmentation_config.map((step, index) => (
+                <p key={index}>
+                  <strong>{step.name}:</strong>{' '}
+                  {step.type === 'flip' && `Direction: ${step.params.direction}`}
+                  {step.type === 'rotate' && `Angle: ${step.params.angle}°`}
+                </p>
+              ))
+            ) : (
+              <p>No augmentations were applied.</p>
+            )}
+          </div>
         </div>
       </div>
     </Block>
@@ -960,9 +1016,6 @@ export const DatasetVersion = () => {
             >
               <div style={{ flex: 1, cursor: 'pointer' }}>
                 <div className={styles['version-item__name']}>{version.name}</div>
-                <div className={styles['version-item__meta']}>
-                  <span>v{version.version}</span>
-                </div>
               </div>
               <div className={styles['version-item__actions']}>
                 <Space size="small">

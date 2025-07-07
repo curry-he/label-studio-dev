@@ -1,6 +1,7 @@
 """This file and its contents are licensed under the Apache License 2.0. Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
 """
 import logging
+from PIL import Image, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -10,24 +11,55 @@ def auto_orient(image, **kwargs):
     :param image: PIL Image object
     :return: PIL Image object
     """
-    # Placeholder for auto-orient logic
     logger.info("Applying auto-orient...")
-    # from PIL import ImageOps
-    # return ImageOps.exif_transpose(image)
-    return image
+    return ImageOps.exif_transpose(image)
 
-def resize(image, width, height, **kwargs):
+def resize(image, width, height, mode='stretch_to', **kwargs):
     """
-    Resizes an image to the specified width and height.
+    Resizes an image to the specified width and height using different modes.
     :param image: PIL Image object
     :param width: Target width
     :param height: Target height
+    :param mode: Resize mode ('stretch_to', 'fit_within', 'fill_center_crop', 'fit_black_edges', 'fit_white_edges', 'fit_reflect_edges')
     :return: PIL Image object
     """
-    # Placeholder for resize logic
-    logger.info(f"Resizing image to {width}x{height}...")
-    # return image.resize((width, height))
-    return image
+    logger.info(f"Resizing image to {width}x{height} with mode '{mode}'...")
+
+    if mode == 'stretch_to':
+        return image.resize((width, height), Image.LANCZOS)
+
+    elif mode == 'fit_within':
+        img_copy = image.copy()
+        img_copy.thumbnail((width, height), Image.LANCZOS)
+        return img_copy
+
+    elif mode == 'fill_center_crop':
+        return ImageOps.fit(image, (width, height), Image.LANCZOS)
+
+    elif mode in ['fit_black_edges', 'fit_white_edges']:
+        color = 'black' if mode == 'fit_black_edges' else 'white'
+        # Calculate new size
+        ratio = min(width / image.width, height / image.height)
+        new_size = (int(image.width * ratio), int(image.height * ratio))
+        
+        # Resize the image
+        resized_image = image.resize(new_size, Image.LANCZOS)
+        
+        # Create a new image with the specified background color and paste the resized image
+        new_image = Image.new("RGB", (width, height), color)
+        paste_position = ((width - new_size[0]) // 2, (height - new_size[1]) // 2)
+        new_image.paste(resized_image, paste_position)
+        return new_image
+
+    elif mode == 'fit_reflect_edges':
+        # For now, treat it like fit_within as a placeholder.
+        img_copy = image.copy()
+        img_copy.thumbnail((width, height), Image.LANCZOS)
+        return img_copy
+
+    else:
+        logger.warning(f"Unknown resize mode: {mode}. Defaulting to 'stretch_to'.")
+        return image.resize((width, height), Image.LANCZOS)
 
 # Register all available preprocessing functions
 AVAILABLE_PREPROCESSING = {
@@ -43,7 +75,8 @@ AVAILABLE_PREPROCESSING = {
         "function": resize,
         "params": [
             {"name": "width", "type": "number", "default": 640},
-            {"name": "height", "type": "number", "default": 640}
+            {"name": "height", "type": "number", "default": 640},
+            {"name": "mode", "type": "string", "default": "stretch_to"}
         ]
     }
 }
