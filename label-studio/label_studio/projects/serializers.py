@@ -433,7 +433,7 @@ class DatasetVersionSerializer(serializers.ModelSerializer):
             'task_count',
             'status',
         ]
-        read_only_fields = ('status', 'created_by')
+        read_only_fields = ('status', 'created_by', 'project')
 
 
     def get_task_count(self, obj):

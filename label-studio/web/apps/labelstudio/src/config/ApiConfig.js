@@ -77,6 +77,7 @@ export const API_CONFIG = {
     autoSplitTasks: "POST:/projects/:project_pk/dataset-versions/:pk/auto-split",
     updateDatasetVersion: "PATCH:/projects/:pk/dataset-versions/:versionId",
     deleteDatasetVersion: "DELETE:/projects/:pk/dataset-versions/:versionId",
+    exportDatasetVersion: "GET:/projects/:pk/dataset-versions/:versionId/export",
     // Webhook
     webhooks: "/webhooks",
     webhook: "/webhooks/:pk",

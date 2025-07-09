@@ -52,6 +52,13 @@ from projects.serializers import (
 from rest_framework import filters, generics, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound
+from django.http import FileResponse
+from data_export.models import DataExport
+from data_export.serializers import ExportDataSerializer
+from data_transforms.preprocessing import apply_preprocessing, transform_annotations
+from data_transforms.augmentation import apply_augmentation
+from PIL import Image
+import io
 from rest_framework.exceptions import ValidationError as RestValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -924,9 +931,11 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from .tasks import process_version_creation
-        project = serializer.validated_data['project']
+        project_pk = self.kwargs.get('project_pk')
+        project = generics.get_object_or_404(Project.objects.all(), pk=project_pk)
         version = serializer.save(
             created_by=self.request.user,
+            project=project,
             status=DatasetVersion.Status.CREATED
         )
         start_job_async_or_sync(process_version_creation, version.id)
@@ -975,6 +984,27 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
         version.save()
         
         return Response({'status': 'Tasks split successfully'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='export')
+    def export(self, request, pk=None, project_pk=None):
+        version = self.get_object()
+        project = version.project
+        export_type = request.GET.get('exportType', 'JSON')
+        download_resources = request.GET.get('download_resources', 'false').lower() == 'true'
+
+        task_ids = VersionTask.objects.filter(version=version).values_list('task_id', flat=True)
+        tasks = Task.objects.filter(id__in=task_ids)
+        
+        # Use a simplified serializer for export
+        exported_tasks = ExportDataSerializer(tasks, many=True, context={'interpolate_key_frames': False}).data
+
+        export_file, content_type, filename = DataExport.generate_export_file(
+            project, exported_tasks, export_type, download_resources, request.GET, hostname=request.build_absolute_uri('/')
+        )
+
+        response = FileResponse(export_file, as_attachment=True, content_type=content_type, filename=filename)
+        response['filename'] = filename
+        return response
 
     @action(detail=False, methods=['get'], url_path='available-transforms')
     def available_transforms(self, request, *args, **kwargs):

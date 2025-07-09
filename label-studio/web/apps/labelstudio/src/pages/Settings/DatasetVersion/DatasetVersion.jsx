@@ -1,4 +1,5 @@
 import { useState, useEffect, useContext } from "react";
+import { useHistory } from "react-router-dom";
 import { Button, Space } from "../../../components";
 import { Block, Elem } from "../../../utils/bem";
 import { ApiContext } from "../../../providers/ApiProvider";
@@ -7,6 +8,7 @@ import styles from "./DatasetVersion.scss";
 import { modal } from "../../../components/Modal/Modal";
 import { ImportPage } from "../../CreateProject/Import/Import";
 import { useImportPage } from "../../CreateProject/Import/useImportPage";
+import { VersionExportModal } from "./VersionExportModal";
 
 // Available preprocessing options
 const PREPROCESSING_OPTIONS = {
@@ -779,6 +781,8 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
 const VersionDetails = ({ version, project }) => {
   const { split_stats, preprocessing_config, augmentation_config, task_count } = version;
   const totalImages = task_count;
+  const history = useHistory();
+  const [showExportModal, setShowExportModal] = useState(false);
 
   const trainPercentage = totalImages > 0 ? Math.round((split_stats.train / totalImages) * 100) : 0;
   const validPercentage = totalImages > 0 ? Math.round((split_stats.valid / totalImages) * 100) : 0;
@@ -792,11 +796,18 @@ const VersionDetails = ({ version, project }) => {
     window.location.href = url;
   };
 
+  const handleExportClick = () => {
+    setShowExportModal(true);
+  };
+
   return (
     <Block name="version-details" className={styles['version-details']}>
       <div className={styles.section}>
         <div className={styles['section-header']}>
           <h3>Dataset Details</h3>
+          <Button onClick={handleExportClick}>
+            Export
+          </Button>
         </div>
 
         <hr />
@@ -893,6 +904,13 @@ const VersionDetails = ({ version, project }) => {
           </div>
         </div>
       </div>
+
+      <VersionExportModal
+        visible={showExportModal}
+        onHide={() => setShowExportModal(false)}
+        project={project}
+        version={version}
+      />
     </Block>
   );
 };

@@ -1,39 +1,27 @@
 import { useEffect, useRef, useState } from "react";
-import { useHistory } from "react-router";
-import { Button } from "../../components";
-import { Form, Input } from "../../components/Form";
-import { Modal } from "../../components/Modal/Modal";
-import { Space } from "../../components/Space/Space";
-import { useAPI } from "../../providers/ApiProvider";
-import { useFixedLocation, useParams } from "../../providers/RoutesProvider";
-import { BemWithSpecifiContext } from "../../utils/bem";
-import { isDefined } from "../../utils/helpers";
-import "./ExportPage.scss";
-
-// const formats = {
-//   json: 'JSON',
-//   csv: 'CSV',
-// };
-
-const downloadFile = (blob, filename) => {
-  const link = document.createElement("a");
-
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  link.click();
-};
+import { Button } from "../../../components";
+import { Form, Input } from "../../../components/Form";
+import { Modal } from "../../../components/Modal/Modal";
+import { Space } from "../../../components/Space/Space";
+import { useAPI } from "../../../providers/ApiProvider";
+import { BemWithSpecifiContext } from "../../../utils/bem";
+import "./VersionExportModal.scss";
 
 const { Block, Elem } = BemWithSpecifiContext();
 
-const wait = () => new Promise((resolve) => setTimeout(resolve, 5000));
+const downloadFile = (blob, filename) => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'export.zip';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
 
-export const ExportPage = () => {
-  const history = useHistory();
-  const location = useFixedLocation();
-  const pageParams = useParams();
+export const VersionExportModal = ({ visible, onHide, project, version }) => {
   const api = useAPI();
-
-  const [previousExports, setPreviousExports] = useState([]);
   const [downloading, setDownloading] = useState(false);
   const [downloadingMessage, setDownloadingMessage] = useState(false);
   const [availableFormats, setAvailableFormats] = useState([]);
@@ -55,33 +43,25 @@ export const ExportPage = () => {
       booleansAsNumbers: true,
     });
 
-    const queryParams = new URLSearchParams(location.search);
-    const versionId = queryParams.get('version');
-
-    let response;
-    if (versionId) {
-      response = await api.callApi("exportDatasetVersion", {
+    try {
+      const response = await api.callApi("exportDatasetVersion", {
         params: {
-          pk: pageParams.id,
-          versionId: versionId,
+          pk: project.id,
+          versionId: version.id,
           ...params,
         },
       });
-    } else {
-      response = await api.callApi("exportRaw", {
-        params: {
-          pk: pageParams.id,
-          ...params,
-        },
-      });
-    }
 
-    if (response.ok) {
-      const blob = await response.blob();
-
-      downloadFile(blob, response.headers.get("filename"));
-    } else {
-      api.handleError(response);
+      if (response.ok) {
+        const blob = await response.blob();
+        downloadFile(blob, response.headers.get("filename"));
+        onHide(); // Close modal after successful export
+      } else {
+        api.handleError(response);
+      }
+    } catch (error) {
+      console.error('Export error:', error);
+      api.handleError(error);
     }
 
     setDownloading(false);
@@ -90,46 +70,35 @@ export const ExportPage = () => {
   };
 
   useEffect(() => {
-    if (isDefined(pageParams.id)) {
-      api
-        .callApi("previousExports", {
-          params: {
-            pk: pageParams.id,
-          },
-        })
-        .then(({ export_files }) => {
-          setPreviousExports(export_files.slice(0, 1));
-        });
-
+    if (visible && project?.id) {
       api
         .callApi("exportFormats", {
           params: {
-            pk: pageParams.id,
+            pk: project.id,
           },
         })
         .then((formats) => {
           setAvailableFormats(formats);
-          setCurrentFormat(formats[0]?.name);
+          setCurrentFormat(formats[0]?.name || "JSON");
+        })
+        .catch((error) => {
+          console.error('Failed to load export formats:', error);
         });
     }
-  }, [pageParams]);
+  }, [visible, project?.id]);
+
+  if (!visible) return null;
 
   return (
     <Modal
-      onHide={() => {
-        const path = location.pathname.replace(ExportPage.path, "");
-        const search = location.search;
-
-        history.replace(`${path}${search !== "?" ? search : ""}`);
-      }}
-      title="Export data"
+      onHide={onHide}
+      title={`Export Dataset Version: ${version?.name || version?.id}`}
       style={{ width: 720 }}
       closeOnClickOutside={false}
       allowClose={!downloading}
-      // footer="Read more about supported export formats in the Documentation."
       visible
     >
-      <Block name="export-page">
+      <Block name="version-export-modal">
         <FormatInfo
           availableFormats={availableFormats}
           selected={currentFormat}
@@ -142,7 +111,7 @@ export const ExportPage = () => {
 
         <Elem name="footer">
           <Space style={{ width: "100%" }} spread>
-            <Elem name="recent">{/* {exportHistory} */}</Elem>
+            <Elem name="recent">{/* Previous exports could go here */}</Elem>
             <Elem name="actions">
               <Space>
                 {downloadingMessage && "Files are being prepared. It might take some time."}
@@ -161,7 +130,7 @@ export const ExportPage = () => {
 const FormatInfo = ({ availableFormats, selected, onClick }) => {
   return (
     <Block name="formats">
-      <Elem name="info">You can export dataset in one of the following formats:</Elem>
+      <Elem name="info">You can export dataset version in one of the following formats:</Elem>
       <Elem name="list">
         {availableFormats.map((format) => (
           <Elem
@@ -209,6 +178,3 @@ const FormatInfo = ({ availableFormats, selected, onClick }) => {
     </Block>
   );
 };
-
-ExportPage.path = "/export";
-ExportPage.modal = true;

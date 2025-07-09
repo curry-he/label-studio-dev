@@ -62,6 +62,7 @@ _api_urlpatterns += [
     path('<int:project_pk>/dataset-versions/', DatasetVersionViewSet.as_view({'get': 'list', 'post': 'create'}), name='datasetversion-list'),
     path('<int:project_pk>/dataset-versions/<int:pk>/', DatasetVersionViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'}), name='datasetversion-detail'),
     path('<int:project_pk>/dataset-versions/<int:pk>/auto-split/', DatasetVersionViewSet.as_view({'post': 'auto_split'}), name='datasetversion-auto-split'),
+    path('<int:project_pk>/dataset-versions/<int:pk>/export/', DatasetVersionViewSet.as_view({'get': 'export'}), name='datasetversion-export'),
 ]
 _api_urlpatterns += router.urls
 
