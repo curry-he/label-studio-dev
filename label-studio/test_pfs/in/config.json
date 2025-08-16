@@ -1,0 +1,11 @@
+{
+  "preprocessing": [
+    { "type": "resize", "params": { "width": 512, "height": 512 } },
+    { "type": "grayscale" }
+  ],
+  "augmentation": [
+    { "type": "flip", "params": { "direction": "horizontal" } },
+    { "type": "rotate", "params": { "limit": 30 } }
+  ],
+  "split": {}
+}
