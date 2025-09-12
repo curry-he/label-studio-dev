@@ -931,13 +931,25 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from .tasks import process_version_creation
+        from core.redis import start_job_async_or_sync
         project_pk = self.kwargs.get('project_pk')
         project = generics.get_object_or_404(Project.objects.all(), pk=project_pk)
+        
+        # 获取split_config数据
+        split_config = self.request.data.get('split_config', {})
+        
         version = serializer.save(
             created_by=self.request.user,
             project=project,
-            status=DatasetVersion.Status.CREATED
+            status=DatasetVersion.Status.CREATED,
+            split_config=split_config  # 显式保存split_config
         )
+        
+        # 执行任务分割
+        if split_config:
+            split_tasks_for_version(version, split_config)
+            
+        # 启动Pachyderm处理任务
         start_job_async_or_sync(process_version_creation, version.id)
 
     @swagger_auto_schema(
@@ -1008,6 +1020,7 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='available-transforms')
     def available_transforms(self, request, *args, **kwargs):
+        """返回可用的数据预处理和增强配置选项"""
         from data_transforms.preprocessing import AVAILABLE_PREPROCESSING
         from data_transforms.augmentation import AVAILABLE_AUGMENTATION
 
@@ -1022,6 +1035,61 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
             'preprocessing': clean_config(AVAILABLE_PREPROCESSING),
             'augmentation': clean_config(AVAILABLE_AUGMENTATION)
         })
+    
+    @action(detail=True, methods=['get'], url_path='processed-files')
+    def get_processed_files(self, request, pk=None, project_pk=None):
+        """获取版本处理后的文件列表"""
+        version = self.get_object()
+        
+        if not version.pachyderm_output_commit:
+            return Response({'error': '版本尚未处理完成'}, status=400)
+            
+        try:
+            from . import pachyderm_utils as pachu
+            client = pachu.get_pachyderm_client()
+            
+            # 创建 commit 对象
+            from pachyderm_sdk.api import pfs
+            commit = pfs.Commit(
+                repo=pfs.Repo(name=f"ls-output-{version.project.id}"),
+                id=version.pachyderm_output_commit
+            )
+            
+            processed_files = pachu.get_processed_files_from_version(client, commit)
+            
+            return Response({
+                'files': processed_files,
+                'total_count': len(processed_files),
+                'version_id': version.id,
+                'commit_id': version.pachyderm_output_commit
+            })
+            
+        except Exception as e:
+            logger.error(f"获取处理文件失败 version {version.id}: {e}")
+            return Response({'error': f'获取处理文件失败: {str(e)}'}, status=500)
+    
+    @action(detail=True, methods=['post'], url_path='retry-processing')
+    def retry_processing(self, request, pk=None, project_pk=None):
+        """重试失败的版本处理"""
+        version = self.get_object()
+        
+        if version.status not in [DatasetVersion.Status.FAILED, DatasetVersion.Status.CREATED]:
+            return Response({'error': '只能重试失败或未开始的版本'}, status=400)
+            
+        # 重置状态并重新开始处理
+        version.status = DatasetVersion.Status.CREATED
+        version.error_message = None
+        version.pachyderm_input_commit = None
+        version.pachyderm_output_commit = None
+        version.processed_at = None
+        version.save()
+        
+        # 重新启动处理任务
+        from core.redis import start_job_async_or_sync
+        from .tasks import process_version_creation
+        start_job_async_or_sync(process_version_creation, version.id)
+        
+        return Response({'message': '版本处理已重新开始'})
 
 
 def split_tasks_for_version(version, split_config):

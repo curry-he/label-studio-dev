@@ -78,6 +78,9 @@ export const API_CONFIG = {
     updateDatasetVersion: "PATCH:/projects/:pk/dataset-versions/:versionId",
     deleteDatasetVersion: "DELETE:/projects/:pk/dataset-versions/:versionId",
     exportDatasetVersion: "GET:/projects/:pk/dataset-versions/:versionId/export",
+    availableTransforms: "GET:/projects/:pk/dataset-versions/available-transforms",
+    processedFiles: "GET:/projects/:pk/dataset-versions/:versionId/processed-files",
+    retryProcessing: "POST:/projects/:pk/dataset-versions/:versionId/retry-processing",
     // Webhook
     webhooks: "/webhooks",
     webhook: "/webhooks/:pk",

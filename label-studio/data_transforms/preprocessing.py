@@ -58,8 +58,32 @@ def transform_annotations(annotations, transform_params, original_width, origina
         
     return new_annotations
 
+# 可用的预处理配置
+AVAILABLE_PREPROCESSING = {
+    'resize': {
+        'name': '调整图像尺寸',
+        'description': '将图像调整到指定尺寸',
+        'function': resize_image,
+        'params': {
+            'width': {'type': 'int', 'default': 512, 'min': 32, 'max': 4096, 'description': '目标宽度'},
+            'height': {'type': 'int', 'default': 512, 'min': 32, 'max': 4096, 'description': '目标高度'},
+            'mode': {'type': 'select', 'default': 'stretch_to', 'options': ['stretch_to', 'fit_within', 'fill_crop'], 'description': '缩放模式'}
+        }
+    },
+    'auto_orient': {
+        'name': '自动旋转',
+        'description': '根据 EXIF 数据自动调整图像方向',
+        'function': auto_orient,
+        'params': {}
+    },
+    'grayscale': {
+        'name': '灰度化',
+        'description': '将彩色图像转换为灰度图像',
+        'function': grayscale,
+        'params': {}
+    }
+}
+
 PREPROCESSING_FUNCTIONS = {
-    'resize': resize_image,
-    'auto_orient': auto_orient,
-    'grayscale': grayscale,
+    name: config['function'] for name, config in AVAILABLE_PREPROCESSING.items()
 }

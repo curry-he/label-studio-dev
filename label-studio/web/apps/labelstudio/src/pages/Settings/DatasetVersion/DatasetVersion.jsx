@@ -47,14 +47,33 @@ const AUGMENTATION_OPTIONS = {
     name: "Flip",
     description: "Flip the image horizontally or vertically.",
     params: [
-      { name: "direction", type: "select", default: "horizontal", options: ["horizontal", "vertical"], label: "Direction" }
+      { name: "direction", type: "select", default: "horizontal", options: ["horizontal", "vertical"], label: "Direction" },
+      { name: "p", type: "number", default: 0.5, min: 0, max: 1, step: 0.1, label: "Probability" }
     ]
   },
   "rotate": {
     name: "Rotate",
-    description: "Rotate the image by a certain angle.",
+    description: "Rotate the image by a random angle within the specified limit.",
     params: [
-      { name: "angle", type: "number", default: 90, label: "Angle (degrees)" }
+      { name: "limit", type: "number", default: 90, label: "Max Rotation Angle (degrees)" },
+      { name: "p", type: "number", default: 0.5, min: 0, max: 1, step: 0.1, label: "Probability" }
+    ]
+  },
+  "brightness_contrast": {
+    name: "Brightness & Contrast",
+    description: "Randomly adjust image brightness and contrast.",
+    params: [
+      { name: "brightness_limit", type: "number", default: 0.2, min: 0, max: 1, step: 0.1, label: "Brightness Limit" },
+      { name: "contrast_limit", type: "number", default: 0.2, min: 0, max: 1, step: 0.1, label: "Contrast Limit" },
+      { name: "p", type: "number", default: 0.5, min: 0, max: 1, step: 0.1, label: "Probability" }
+    ]
+  },
+  "gaussian_noise": {
+    name: "Gaussian Noise",
+    description: "Add random Gaussian noise to the image.",
+    params: [
+      { name: "var_limit", type: "range", default: [10.0, 50.0], label: "Variance Range" },
+      { name: "p", type: "number", default: 0.5, min: 0, max: 1, step: 0.1, label: "Probability" }
     ]
   }
 };

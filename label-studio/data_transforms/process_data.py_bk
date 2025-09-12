@@ -1,0 +1,95 @@
+import os
+import json
+from PIL import Image
+from preprocessing import apply_preprocessing, transform_annotations as transform_annotations_preprocessing
+from augmentation import apply_augmentation
+
+def main():
+    # Pachyderm mounts input repos in /pfs/<repo_name>.
+    # We list /pfs to find our input repo directory.
+    pfs_root = '/pfs'
+    try:
+        input_repo_dirs = [d for d in os.listdir(pfs_root) if d != 'out']
+        if not input_repo_dirs:
+            raise Exception("No input repository found in /pfs")
+        input_repo_name = input_repo_dirs[0]
+        input_dir = os.path.join(pfs_root, input_repo_name)
+        print(f"Using input directory: {input_dir}")
+    except Exception as e:
+        print(f"Error finding input directory: {e}")
+        # Fallback to original hardcoded path for debugging
+        input_dir = '/pfs/in'
+        print(f"Fallback to: {input_dir}")
+    
+    output_dir = os.environ.get('PFS_OUTPUT', '/pfs/out')
+
+    config_path = os.path.join(input_dir, 'config.json')
+    print(f"Reading config from: {config_path}")
+    
+    if not os.path.exists(config_path):
+        print(f"Config file not found at {config_path}")
+        print(f"Available files in {input_dir}:")
+        try:
+            for item in os.listdir(input_dir):
+                print(f"  {item}")
+        except Exception as e:
+            print(f"  Error listing directory: {e}")
+        return
+        
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    print(f"Config loaded: {config}")
+
+    data_dir = os.path.join(input_dir, 'data')
+    print(f"Looking for images in: {data_dir}")
+    
+    if not os.path.exists(data_dir):
+        print(f"Data directory not found at {data_dir}")
+        print(f"Available items in {input_dir}:")
+        try:
+            for item in os.listdir(input_dir):
+                print(f"  {item}")
+        except Exception as e:
+            print(f"  Error listing directory: {e}")
+        return
+        
+    image_files = [f for f in os.listdir(data_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    print(f"Found {len(image_files)} image files: {image_files}")
+    
+    for filename in image_files:
+        image_path = os.path.join(data_dir, filename)
+        print(f"Processing image: {image_path}")
+            
+        # This is a placeholder for annotation loading.
+        # In a real scenario, you'd load annotations for each image.
+        annotations = []
+
+        with Image.open(image_path) as img:
+                original_width, original_height = img.size
+
+                # Apply preprocessing
+                processed_img, pp_params = apply_preprocessing(img, config.get('preprocessing'))
+                
+                # Apply augmentation (example for a 'train' subset)
+                # In a real pipeline, you'd need a way to determine the subset for each image.
+                is_train_sample = True 
+                if is_train_sample:
+                    processed_img, _, aug_params = apply_augmentation(processed_img, annotations, config.get('augmentation'))
+                else:
+                    aug_params = {}
+
+                # Save the processed image
+                output_image_path = os.path.join(output_dir, filename)
+                processed_img.save(output_image_path)
+
+                # Transform annotations and save them
+                transform_params = {**pp_params, **aug_params}
+                new_annotations = transform_annotations_preprocessing(annotations, transform_params, original_width, original_height)
+                
+                output_annotation_path = os.path.join(output_dir, os.path.splitext(filename)[0] + '.json')
+                with open(output_annotation_path, 'w') as f:
+                    json.dump(new_annotations, f)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,32 @@
+{
+  "pipeline": {
+    "name": "smart-match-pipeline",
+    "project": {
+      "name": "default"
+    }
+  },
+  "description": "智能匹配模式：通过标注数据中的原始文件名信息匹配图片和标注",
+  "input": {
+    "cross": [
+      {
+        "pfs": {
+          "repo": "raw_images",
+          "glob": "/"
+        }
+      },
+      {
+        "pfs": {
+          "repo": "annotations",
+          "glob": "/"
+        }
+      }
+    ]
+  },
+  "transform": {
+    "image": "localhost:5000/ls-processor:latest",
+    "cmd": [
+      "python",
+      "/app/process_data_smart_match.py"
+    ]
+  }
+}

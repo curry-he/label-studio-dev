@@ -1544,6 +1544,24 @@ class DatasetVersion(models.Model):
     status = models.CharField(
         _('status'), max_length=64, choices=Status.choices, default=Status.CREATED
     )
+    
+    # Pachyderm 集成字段
+    pachyderm_input_commit = models.CharField(
+        max_length=256, null=True, blank=True,
+        help_text='Pachyderm input repository commit ID'
+    )
+    pachyderm_output_commit = models.CharField(
+        max_length=256, null=True, blank=True,
+        help_text='Pachyderm output repository commit ID'
+    )
+    processed_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the data processing was completed'
+    )
+    error_message = models.TextField(
+        null=True, blank=True,
+        help_text='Error message if processing failed'
+    )
 
     def __str__(self):
         return f"{self.project.title} - {self.name} ({self.version})"

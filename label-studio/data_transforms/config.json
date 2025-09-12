@@ -1,0 +1,31 @@
+{
+  "version_id": 78,
+  "project_id": 8,
+  "preprocessing": [
+    {
+      "type": "resize",
+      "params": {
+        "width": 640,
+        "height": 480,
+        "mode": "stretch_to"
+      }
+    }
+  ],
+  "augmentation": [
+    {
+      "type": "rotate",
+      "params": {
+        "limit": 180,
+        "p": 1.0
+      }
+    },
+    {
+      "type": "brightness_contrast",
+      "params": {
+        "brightness_limit": 0.2,
+        "contrast_limit": 0.2,
+        "p": 1.0
+      }
+    }
+  ]
+}

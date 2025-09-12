@@ -412,7 +412,7 @@ class GetFieldsSerializer(serializers.Serializer):
 
 
 class DatasetVersionSerializer(serializers.ModelSerializer):
-    split_config = serializers.JSONField(write_only=True, required=False)
+    split_config = serializers.JSONField(required=False)  # 移除write_only，支持读写
     created_by = UserSimpleSerializer(read_only=True)
     split_stats = serializers.SerializerMethodField()
     task_count = serializers.SerializerMethodField()
@@ -432,8 +432,16 @@ class DatasetVersionSerializer(serializers.ModelSerializer):
             'split_stats',
             'task_count',
             'status',
+            'pachyderm_input_commit',
+            'pachyderm_output_commit',
+            'processed_at',
+            'error_message',
         ]
-        read_only_fields = ('status', 'created_by', 'project')
+        read_only_fields = (
+            'created_by', 'project',
+            'pachyderm_input_commit', 'pachyderm_output_commit',
+            'processed_at', 'error_message'
+        )
 
 
     def get_task_count(self, obj):
