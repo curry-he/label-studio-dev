@@ -1,0 +1,32 @@
+{
+  "pipeline": {
+    "name": "format-converter-voc"
+  },
+  "description": "Convert augmented dataset to Pascal VOC format",
+  "input": {
+    "pfs": {
+      "name": "augmented_dataset", 
+      "repo": "augmented-dataset-v1",
+      "glob": "/*"
+    }
+  },
+  "transform": {
+    "image": "your-registry/format-converter:latest",
+    "cmd": [
+      "python3",
+      "/app/converter.py"
+    ],
+    "stdin": [],
+    "env": {
+      "FORMAT_TYPE": "VOC"
+    }
+  },
+  "resource_requests": {
+    "memory": "2Gi",
+    "cpu": 1
+  },
+  "resource_limits": {
+    "memory": "4Gi",
+    "cpu": 2
+  }
+}

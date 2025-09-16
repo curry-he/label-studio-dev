@@ -1,0 +1,25 @@
+{
+  "pipeline": {
+    "name": "format-converter-yolo",
+    "project": {
+      "name": "default"
+    }
+  },
+  "description": "Convert augmented dataset to YOLO format",
+  "input": {
+    "pfs": {
+      "name": "augmented_dataset",
+      "repo": "smart-match-pipeline",
+      "glob": "/"
+    }
+  },
+  "transform": {
+    "image": "localhost:5000/format-converter:latest",
+    "cmd": [
+      "python3",
+      "/app/converter.py",
+      "--format",
+      "YOLO"
+    ]
+  }
+}
