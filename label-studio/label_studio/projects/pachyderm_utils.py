@@ -16,7 +16,7 @@ def get_pachyderm_client():
         client = pachyderm_sdk.Client(
             host='localhost',
             port=80,
-            auth_token='6912f4a8a9354e3883392e7521c1806d',
+            auth_token='257ff1a708284e9582fe3ac0a34f7864',
             root_certs=None,
             transaction_id=None,
             tls=False
@@ -236,11 +236,90 @@ def create_smart_match_pipeline_spec(raw_images_repo: str, annotations_repo: str
     logger.info(f"创建智能匹配管道规范: {raw_images_repo} + {annotations_repo} -> {output_repo}")
     return pipeline_spec
 
+def create_format_converter_pipeline_spec(input_repo: str, output_repo: str) -> dict:
+    """
+    创建格式转换管道规范
+    将数据集处理输出转换为YOLO格式
+    
+    Args:
+        input_repo: 输入仓库名（来自ls-dataset管道的输出）
+        output_repo: 输出仓库名
+    
+    Returns:
+        Pachyderm管道规范字典
+    """
+    pipeline_spec = {
+        "pipeline": {
+            "name": output_repo,
+            "project": {
+                "name": "default"
+            }
+        },
+        "description": f"格式转换管道：将 {input_repo} 的输出转换为YOLO格式",
+        "input": {
+            "pfs": {
+                "repo": input_repo,
+                "glob": "/"
+            }
+        },
+        "transform": {
+            "image": "localhost:5000/format-converter:latest",
+            "cmd": [
+                "python",
+                "/app/converter.py",
+                "--input_dir", "/pfs/" + input_repo,
+                "--output_dir", "/pfs/out"
+            ]
+        }
+    }
+    
+    logger.info(f"创建格式转换管道规范: {input_repo} -> {output_repo}")
+    return pipeline_spec
+
 def create_or_update_pipeline(client: pachyderm_sdk.Client, spec: dict):
     """Creates or updates a Pachyderm pipeline from a dictionary spec."""
     client.pps.create_pipeline_v2(create_pipeline_request_json=json.dumps(spec), update=True)
     pipeline_name = spec.get("pipeline", {}).get("name", "unknown")
     logger.info(f"Pipeline '{pipeline_name}' created/updated successfully.")
+
+def wait_for_pipeline_output(client: pachyderm_sdk.Client, output_repo_name: str, timeout: int = 600) -> pfs.Commit:
+    """
+    等待管道输出仓库有数据生成
+    更可靠的方法：直接检查输出仓库是否有文件
+    """
+    logger.info(f"等待管道输出仓库 {output_repo_name} 生成数据...")
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        try:
+            # 检查仓库的最新commit
+            repo_info = client.pfs.inspect_repo(repo=pfs.Repo(name=output_repo_name))
+            if repo_info.branches:
+                # 获取master分支的最新commit
+                master_commit = None
+                for branch in repo_info.branches:
+                    if branch.branch.name == "master":
+                        master_commit = branch.head
+                        break
+                
+                if master_commit:
+                    # 检查commit是否有文件
+                    try:
+                        files = list(client.pfs.list_file(commit=master_commit, path="/"))
+                        if files:
+                            logger.info(f"管道输出完成! 仓库 {output_repo_name} 包含 {len(files)} 个文件/目录")
+                            logger.info(f"输出commit: {master_commit.id}")
+                            return master_commit
+                    except Exception as e:
+                        logger.debug(f"检查文件列表时出错: {e}")
+            
+        except Exception as e:
+            logger.debug(f"检查仓库 {output_repo_name} 时出错: {e}")
+        
+        logger.info(f"等待中... ({int(time.time() - start_time)}s/{timeout}s)")
+        time.sleep(10)
+    
+    raise Exception(f"管道输出超时 {timeout} 秒，仓库 {output_repo_name} 仍然没有数据")
 
 def wait_for_job_completion(client: pachyderm_sdk.Client, input_commit: pfs.Commit, output_repo_name: str, timeout: int = 600) -> pfs.Commit:
     """Polls Pachyderm until the job triggered by the input commit is finished."""

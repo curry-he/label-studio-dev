@@ -40,23 +40,35 @@ def process_version_creation(version_id):
         logger.info(f"📂 智能匹配输入仓库: {raw_images_repo} (原始图片) + {annotations_repo} (标注)")
         logger.info(f"📂 输出仓库: {output_repo}")
 
-        # 3. 准备处理配置（包含前端传递的预处理和增强配置）
+        # 3. 准备处理配置（包含前端传递的预处理、增强和分割配置）
+        split_config = version.split_config or {"enabled": False}
+        
         config_for_pfs = {
             "version_id": version_id,
             "project_id": project_id,
             "smart_match_mode": True,
             "preprocessing": version.preprocessing_config or [],
             "augmentation": version.augmentation_config or [],
+            "split": split_config,
             "created_at": timezone.now().isoformat()
         }
+        
+        # 如果启用了数据集分割但没有指定随机种子，添加默认种子
+        if split_config.get("enabled") and "random_seed" not in split_config:
+            config_for_pfs["random_seed"] = version_id  # 使用version_id作为种子确保可重现性
         
         logger.info(f"📋 处理配置内容:")
         logger.info(f"  - 预处理: {len(version.preprocessing_config or [])} 个步骤")
         logger.info(f"  - 数据增强: {len(version.augmentation_config or [])} 个步骤")
+        logger.info(f"  - 数据集分割: {'启用' if split_config.get('enabled') else '禁用'}")
+        if "random_seed" in config_for_pfs:
+            logger.info(f"  - 随机种子: {config_for_pfs['random_seed']}")
         if version.preprocessing_config:
             logger.info(f"  - 预处理详情: {version.preprocessing_config}")
         if version.augmentation_config:
             logger.info(f"  - 增强详情: {version.augmentation_config}")
+        if split_config.get('enabled'):
+            logger.info(f"  - 分割详情: {split_config}")
 
         # 4. 提交配置到raw_images仓库（智能匹配脚本从这里读取config.json）
         config_commit = pachu.commit_processing_config_to_repo(
@@ -76,13 +88,95 @@ def process_version_creation(version_id):
         pachu.create_or_update_pipeline(client, pipeline_spec)
         logger.info(f"智能匹配管道已创建/更新: {output_repo}")
 
-        # 7. 等待智能匹配管道处理完成
-        output_commit = pachu.wait_for_job_completion(client, config_commit, output_repo)
-        logger.info(f"智能匹配管道处理完成, output commit: {output_commit.id}")
+        # 7. 等待智能匹配管道完成并检查输出
+        logger.info(f"等待智能匹配管道 {output_repo} 处理完成...")
+        
+        # 等待足够时间让管道处理（根据数据量调整）
+        import time
+        time.sleep(180)  # 等待3分钟
+        
+        # 使用更简单可靠的方法检查输出
+        try:
+            from pachyderm_sdk.api import pfs
+            
+            # 创建 master branch 对象
+            master_branch = pfs.Branch(repo=pfs.Repo(name=output_repo), name="master")
+            
+            # 获取master分支的最新commit
+            branch_info = client.pfs.inspect_branch(branch=master_branch)
+            latest_commit = branch_info.head
+            
+            # 创建 File 对象用于 list_file 调用
+            file_obj = pfs.File(commit=latest_commit, path="/")
+            files = list(client.pfs.list_file(file=file_obj))
+            
+            if files:
+                logger.info(f"智能匹配管道输出确认: {len(files)} 个文件/目录")
+                # 使用已获取的commit
+                output_commit = latest_commit
+                logger.info(f"输出commit: {output_commit.id}")
+            else:
+                raise Exception(f"输出仓库 {output_repo} 没有文件")
+                
+        except Exception as e:
+            logger.error(f"检查智能匹配输出失败: {e}")
+            # 再等待一段时间重试
+            logger.info("等待更长时间后重试...")
+            time.sleep(120)  # 再等2分钟
+            try:
+                # 确保 master_branch 对象在重试作用域中
+                master_branch = pfs.Branch(repo=pfs.Repo(name=output_repo), name="master")
+                
+                # 重新获取最新commit并使用正确的 File 对象调用list_file
+                branch_info = client.pfs.inspect_branch(branch=master_branch)
+                latest_commit = branch_info.head
+                file_obj = pfs.File(commit=latest_commit, path="/")
+                files = list(client.pfs.list_file(file=file_obj))
+                if files:
+                    logger.info(f"重试成功: {len(files)} 个文件/目录")
+                    output_commit = latest_commit
+                else:
+                    raise Exception(f"重试后仍然没有数据: {output_repo}")
+            except Exception as retry_e:
+                logger.error(f"重试也失败: {retry_e}")
+                raise
 
-        # 8. 存储结果
+        # 8. 创建format-converter管道
+        format_converter_repo = f"format-converter-yolo-{project_id}-v{version_id}"
+        logger.info(f"📋 创建格式转换管道: {format_converter_repo}")
+        
+        format_converter_spec = pachu.create_format_converter_pipeline_spec(
+            input_repo=output_repo,  # 使用智能匹配的输出作为输入
+            output_repo=format_converter_repo
+        )
+        
+        pachu.create_or_update_pipeline(client, format_converter_spec)
+        logger.info(f"格式转换管道已创建/更新: {format_converter_repo}")
+
+        # 9. 等待格式转换管道输出仓库有数据  
+        logger.info(f"等待格式转换管道 {format_converter_repo} 处理完成...")
+        time.sleep(120)  # 等待2分钟
+        
+        try:
+            # 直接检查format-converter的master分支
+            format_master_branch = pfs.Branch(repo=pfs.Repo(name=format_converter_repo), name="master")
+            format_files = list(client.pfs.list_file(branch=format_master_branch, path="/"))
+            
+            if format_files:
+                logger.info(f"格式转换管道输出确认: {len(format_files)} 个文件/目录")
+                # 获取format-converter的最新commit
+                format_branch_info = client.pfs.inspect_branch(branch=format_master_branch)
+                format_output_commit = format_branch_info.head
+                logger.info(f"格式转换输出commit: {format_output_commit.id}")
+            else:
+                raise Exception(f"格式转换仓库 {format_converter_repo} 没有文件")
+        except Exception as e:
+            logger.error(f"检查格式转换输出失败: {e}")
+            raise
+
+        # 10. 存储结果
         version.pachyderm_input_commit = config_commit.id
-        version.pachyderm_output_commit = output_commit.id
+        version.pachyderm_output_commit = format_output_commit.id  # 保存最终的格式转换输出
         version.processed_at = timezone.now()
         
         # 9. 获取处理结果报告
@@ -109,6 +203,15 @@ def process_version_creation(version_id):
                     # 验证智能匹配处理结果
                     if processing_report.get('intelligent_matching') and processing_report.get('matched_pairs', 0) > 0:
                         logger.info(f"智能匹配处理成功: {processing_report['matched_pairs']} 个图片-标注对")
+                        
+                        # 检查数据集分割结果
+                        if processing_report.get('dataset_split_enabled') and processing_report.get('split_results'):
+                            split_results = processing_report['split_results']
+                            logger.info(f"数据集分割结果:")
+                            for split_name, result in split_results.items():
+                                logger.info(f"  - {split_name.upper()}: {result['processed']}/{result['total']} 成功处理")
+                        else:
+                            logger.info("使用传统模式处理（未启用数据集分割）")
                     else:
                         logger.warning("智能匹配处理可能存在问题，请检查图片文件名和标注数据的匹配情况")
                 else:
@@ -129,9 +232,11 @@ def process_version_creation(version_id):
         version.status = DatasetVersion.Status.COMPLETED
         version.save()
         
-        logger.info(f"版本 {version_id} 处理完成 (智能匹配模式)")
-        logger.info(f"  - 输入: {raw_images_repo} + {annotations_repo} (智能匹配)")
-        logger.info(f"  - 输出: {output_repo} (commit: {output_commit.id})")
+        logger.info(f"版本 {version_id} 处理完成 (智能匹配+格式转换模式)")
+        logger.info(f"  - 数据处理: {raw_images_repo} + {annotations_repo} -> {output_repo}")
+        logger.info(f"  - 格式转换: {output_repo} -> {format_converter_repo}")
+        logger.info(f"  - 最终输出: {format_converter_repo} (commit: {format_output_commit.id})")
+        logger.info(f"  - 数据集分割: {'启用' if split_config.get('enabled') else '禁用'}")
 
     except Exception as e:
         logger.error(f"版本 {version_id} 处理失败: {e}", exc_info=True)

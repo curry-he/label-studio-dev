@@ -374,9 +374,9 @@ const RebalanceModal = ({ onCancel, onSave, project, versions }) => {
 
   const handleSave = () => {
     onSave({
-      train_percent: trainPercent / 100,
-      validation_percent: validPercent / 100,
-      test_percent: testPercent / 100,
+      train: trainPercent,
+      valid: validPercent,
+      test: testPercent,
     });
   };
 
@@ -444,6 +444,7 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
   const [importError, setImportError] = useState(null);
   const [rebalanceLoading, setRebalanceLoading] = useState(false);
   const [splitConfig, setSplitConfig] = useState({ train: 70, valid: 20, test: 10 });
+  const [splitEnabled, setSplitEnabled] = useState(true); // 添加分割开关状态
   const [currentProject, setCurrentProject] = useState(project);
   const [preprocessingSteps, setPreprocessingSteps] = useState([]);
   const [augmentationSteps, setAugmentationSteps] = useState([]);
@@ -468,10 +469,13 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
       version: `v${versions.length + 1}`,
       preprocessing_config: preprocessingSteps,
       augmentation_config: augmentationSteps,
-      split_config: {
-        train_percent: splitConfig.train / 100,
-        validation_percent: splitConfig.valid / 100,
-        test_percent: splitConfig.test / 100,
+      split_config: splitEnabled ? {
+        enabled: true,
+        train: splitConfig.train,
+        test: splitConfig.test,
+        valid: splitConfig.valid
+      } : {
+        enabled: false
       },
     };
     const newVersion = await api.callApi("createDatasetVersion", {
@@ -597,11 +601,11 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
       body: (
         <RebalanceModal
           onCancel={() => modalRef.close()}
-          onSave={(percentages) => {
+          onSave={(newConfig) => {
             setSplitConfig({
-              train: percentages.train_percent * 100,
-              valid: percentages.validation_percent * 100,
-              test: percentages.test_percent * 100,
+              train: newConfig.train,
+              valid: newConfig.valid,
+              test: newConfig.test,
             });
             modalRef.close();
           }}
@@ -676,35 +680,66 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
 
                   return (
                     <>
-                      <div className={styles['split-controls']}>
-                        <div className={`${styles['split-box']} ${styles.train}`}>
-                          <h4 className={styles['split-box__title']}>
-                            <span>TRAIN SET</span>
-                            <span className={styles['split-box__percent']}>{splitConfig.train}%</span>
-                          </h4>
-                          <p className={styles['split-box__images']}>{trainCount} Images</p>
-                        </div>
-                        <div className={`${styles['split-box']} ${styles.valid}`}>
-                          <h4 className={styles['split-box__title']}>
-                            <span>VALID SET</span>
-                            <span className={styles['split-box__percent']}>{splitConfig.valid}%</span>
-                          </h4>
-                          <p className={styles['split-box__images']}>{validCount} Images</p>
-                        </div>
-                        <div className={`${styles['split-box']} ${styles.test}`}>
-                          <h4 className={styles['split-box__title']}>
-                            <span>TEST SET</span>
-                            <span className={styles['split-box__percent']}>{splitConfig.test}%</span>
-                          </h4>
-                          <p className={styles['split-box__images']}>{testCount} Images</p>
-                        </div>
+                      {/* 数据集分割开关 */}
+                      <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #e0e0e0', borderRadius: '4px' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={splitEnabled}
+                            onChange={(e) => setSplitEnabled(e.target.checked)}
+                            style={{ marginRight: '10px' }}
+                          />
+                          <span style={{ fontWeight: 'bold' }}>Enable Dataset Split</span>
+                        </label>
+                        <p style={{ margin: '10px 0 0 0', fontSize: '14px', color: '#666' }}>
+                          {splitEnabled ? 
+                            "Dataset will be split into Train/Valid/Test sets for machine learning training." :
+                            "All data will be processed together without splitting."
+                          }
+                        </p>
                       </div>
-                      <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <Button onClick={handleRebalanceClick} waiting={rebalanceLoading} disabled={!project?.id || rebalanceLoading}>
-                          Rebalance
-                        </Button>
-                        <Button onClick={() => setActiveStep(3)} primary>Continue</Button>
-                      </div>
+
+                      {/* 分割配置界面 - 只在启用时显示 */}
+                      {splitEnabled && (
+                        <>
+                          <div className={styles['split-controls']}>
+                            <div className={`${styles['split-box']} ${styles.train}`}>
+                              <h4 className={styles['split-box__title']}>
+                                <span>TRAIN SET</span>
+                                <span className={styles['split-box__percent']}>{splitConfig.train}%</span>
+                              </h4>
+                              <p className={styles['split-box__images']}>{trainCount} Images</p>
+                            </div>
+                            <div className={`${styles['split-box']} ${styles.valid}`}>
+                              <h4 className={styles['split-box__title']}>
+                                <span>VALID SET</span>
+                                <span className={styles['split-box__percent']}>{splitConfig.valid}%</span>
+                              </h4>
+                              <p className={styles['split-box__images']}>{validCount} Images</p>
+                            </div>
+                            <div className={`${styles['split-box']} ${styles.test}`}>
+                              <h4 className={styles['split-box__title']}>
+                                <span>TEST SET</span>
+                                <span className={styles['split-box__percent']}>{splitConfig.test}%</span>
+                              </h4>
+                              <p className={styles['split-box__images']}>{testCount} Images</p>
+                            </div>
+                          </div>
+                          <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <Button onClick={handleRebalanceClick} waiting={rebalanceLoading} disabled={!project?.id || rebalanceLoading}>
+                              Rebalance
+                            </Button>
+                            <Button onClick={() => setActiveStep(3)} primary>Continue</Button>
+                          </div>
+                        </>
+                      )}
+
+                      {/* 不分割时的继续按钮 */}
+                      {!splitEnabled && (
+                        <div style={{ marginTop: 20, display: 'flex', justifyContent: 'flex-end' }}>
+                          <Button onClick={() => setActiveStep(3)} primary>Continue</Button>
+                        </div>
+                      )}
                     </>
                   );
                 })()}
