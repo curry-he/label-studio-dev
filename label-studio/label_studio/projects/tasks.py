@@ -70,11 +70,11 @@ def process_version_creation(version_id):
         if split_config.get('enabled'):
             logger.info(f"  - 分割详情: {split_config}")
 
-        # 4. 提交配置到raw_images仓库（智能匹配脚本从这里读取config.json）
+        # 4. 提交配置到annotations仓库（智能匹配脚本从这里读取config.json）
         config_commit = pachu.commit_processing_config_to_repo(
-            client, raw_images_repo, config_for_pfs
+            client, annotations_repo, config_for_pfs
         )
-        logger.info(f"配置已提交到 {raw_images_repo}, commit: {config_commit.id}")
+        logger.info(f"配置已提交到 {annotations_repo}, commit: {config_commit.id}")
 
         # 5. 创建智能匹配管道规范
         pipeline_spec = pachu.create_smart_match_pipeline_spec(
@@ -203,17 +203,22 @@ def process_version_creation(version_id):
                     logger.info(f"获取处理报告: {processing_report}")
                     
                     # 验证智能匹配处理结果
-                    if processing_report.get('intelligent_matching') and processing_report.get('matched_pairs', 0) > 0:
-                        logger.info(f"智能匹配处理成功: {processing_report['matched_pairs']} 个图片-标注对")
-                        
+                    if processing_report.get('intelligent_matching'):
                         # 检查数据集分割结果
                         if processing_report.get('dataset_split_enabled') and processing_report.get('split_results'):
                             split_results = processing_report['split_results']
+                            total_matched = processing_report.get('total_matched_pairs', 0)
+                            logger.info(f"智能匹配处理成功: {total_matched} 个图片-标注对")
                             logger.info(f"数据集分割结果:")
                             for split_name, result in split_results.items():
                                 logger.info(f"  - {split_name.upper()}: {result['processed']}/{result['total']} 成功处理")
-                        else:
+                        elif processing_report.get('matched_pairs', 0) > 0 or processing_report.get('processed_pairs', 0) > 0:
+                            # 传统模式或旧格式的处理报告
+                            matched_count = processing_report.get('matched_pairs', processing_report.get('processed_pairs', 0))
+                            logger.info(f"智能匹配处理成功: {matched_count} 个图片-标注对")
                             logger.info("使用传统模式处理（未启用数据集分割）")
+                        else:
+                            logger.warning("智能匹配处理可能存在问题，请检查图片文件名和标注数据的匹配情况")
                     else:
                         logger.warning("智能匹配处理可能存在问题，请检查图片文件名和标注数据的匹配情况")
                 else:

@@ -42,12 +42,13 @@ def commit_data_from_project(client: pachyderm_sdk.Client, repo_name: str, proje
     The logic follows Label Studio's Cloud Storage model:
     - Source Storage: Raw/original data
     - Target Storage: Annotated/labeled data (this is what we process)
+    
+    注意：不再在此函数中提交config.json，配置文件现在单独提交到annotations仓库
     """
     
     with client.pfs.commit(branch=pfs.Branch.from_uri(f"{repo_name}@master")) as commit:
-        # Always commit the config first
-        commit.put_file_from_bytes(path="/config.json", data=json.dumps(config_for_pfs).encode('utf-8'))
-        logger.info(f"Committed config.json to repo '{repo_name}'")
+        # 只提交数据文件，不提交配置文件
+        logger.info(f"开始提交数据到仓库 '{repo_name}'（不包含配置文件）")
         
         # Get tasks that have been completed (annotated)
         annotated_tasks = project.tasks.filter(annotations__isnull=False).distinct()
@@ -179,17 +180,21 @@ def commit_processing_config_to_repo(client: pachyderm_sdk.Client, repo_name: st
         提交对象
     """
     with client.pfs.commit(branch=pfs.Branch.from_uri(f"{repo_name}@master")) as commit:
+        # 将配置文件放在特殊目录中，避免被识别为源数据
         commit.put_file_from_bytes(
-            path="/config.json", 
+            path="/_processing_config/config.json", 
             data=json.dumps(config, indent=2, ensure_ascii=False).encode('utf-8')
         )
-        logger.info(f"提交处理配置到仓库 '{repo_name}', commit: {commit.id}")
+        logger.info(f"提交处理配置到仓库 '{repo_name}' 的 _processing_config/ 目录, commit: {commit.id}")
         return commit
 
 def create_smart_match_pipeline_spec(raw_images_repo: str, annotations_repo: str, output_repo: str, processing_config: dict) -> dict:
     """
     创建智能匹配模式的管道规范
     通过标注数据中的原始文件名信息匹配图片和标注进行处理
+    
+    注意：配置文件现在位于annotations仓库的/_processing_config/config.json
+    处理脚本应该从annotations仓库读取配置，并过滤掉_processing_config目录
     
     Args:
         raw_images_repo: 原始图片仓库名 (Source Cloud Storage)
@@ -207,7 +212,7 @@ def create_smart_match_pipeline_spec(raw_images_repo: str, annotations_repo: str
                 "name": "default"
             }
         },
-        "description": "智能匹配模式：通过标注数据中的原始文件名信息匹配图片和标注",
+        "description": "智能匹配模式：通过标注数据中的原始文件名信息匹配图片和标注，配置文件位于annotations仓库的_processing_config目录",
         "input": {
             "cross": [
                 {
@@ -234,6 +239,7 @@ def create_smart_match_pipeline_spec(raw_images_repo: str, annotations_repo: str
     }
     
     logger.info(f"创建智能匹配管道规范: {raw_images_repo} + {annotations_repo} -> {output_repo}")
+    logger.info(f"配置文件路径: {annotations_repo}/_processing_config/config.json")
     return pipeline_spec
 
 def create_format_converter_pipeline_spec(input_repo: str, output_repo: str, export_format: str = "YOLO", include_original: bool = True, include_augmented: bool = True) -> dict:

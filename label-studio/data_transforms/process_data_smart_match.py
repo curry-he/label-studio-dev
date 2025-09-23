@@ -166,12 +166,21 @@ def find_matching_pairs():
     for img in raw_images[:5]:  # 显示前5个
         print(f"  📸 {os.path.basename(img)}")
     
-    # 扫描标注文件
+    # 扫描标注文件（过滤掉配置文件目录）
     annotations = []
     if os.path.exists("/pfs/annotations"):
         for root, dirs, files in os.walk("/pfs/annotations"):
+            # 过滤掉配置文件目录
+            if "_processing_config" in root:
+                print(f"跳过配置目录: {root}")
+                continue
+                
             for file in files:
                 if file.lower().endswith('.json'):
+                    # 额外检查：跳过明显的配置文件
+                    if file.lower() in ['config.json', 'processing_config.json']:
+                        print(f"跳过配置文件: {file}")
+                        continue
                     annotations.append(os.path.join(root, file))
     
     print(f"找到 {len(annotations)} 个标注文件:")
@@ -222,24 +231,30 @@ def main():
     print("=== 智能匹配模式数据处理 (支持数据集划分) ===")
     print(f"输出目录: {output_dir}")
     
-    # 查找配置文件
+    # 查找配置文件 - 支持新的配置文件位置
     config_path = None
-    config_dirs = ["/pfs/raw_images", "/pfs/annotations"]
-    for search_dir in config_dirs:
-        if os.path.exists(search_dir):
-            potential_config = os.path.join(search_dir, 'config.json')
-            if os.path.exists(potential_config):
+    config_locations = [
+        "/pfs/annotations/_processing_config/config.json",  # 新位置（优先）
+        "/pfs/annotations/config.json",  # 旧位置（向后兼容）
+        "/pfs/raw_images/config.json"   # 最旧位置（向后兼容）
+    ]
+    
+    for potential_config in config_locations:
+        if os.path.exists(potential_config):
+            try:
+                with open(potential_config, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
                 config_path = potential_config
+                print(f"✅ 成功加载配置文件: {config_path}")
+                print(f"配置内容: {json.dumps(config, indent=2, ensure_ascii=False)}")
                 break
+            except Exception as e:
+                print(f"⚠️ 配置文件读取失败 {potential_config}: {e}")
+                continue
     
     if not config_path:
-        print("⚠️ 未找到config.json，使用默认配置")
+        print("⚠️ 未找到有效的config.json，使用默认配置")
         config = {}
-    else:
-        print(f"📋 读取配置文件: {config_path}")
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        print(f"配置内容: {json.dumps(config, indent=2)}")
 
     # 智能匹配图片和标注
     matched_pairs = find_matching_pairs()
