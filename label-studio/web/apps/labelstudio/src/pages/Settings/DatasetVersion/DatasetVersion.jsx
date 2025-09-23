@@ -833,14 +833,14 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
 };
 
 const VersionDetails = ({ version, project }) => {
-  const { split_stats, preprocessing_config, augmentation_config, task_count } = version;
+  const { split_details, preprocessing_config, augmentation_config, task_count } = version;
   const totalImages = task_count;
   const history = useHistory();
   const [showExportModal, setShowExportModal] = useState(false);
 
-  const trainPercentage = totalImages > 0 ? Math.round((split_stats.train / totalImages) * 100) : 0;
-  const validPercentage = totalImages > 0 ? Math.round((split_stats.valid / totalImages) * 100) : 0;
-  const testPercentage = totalImages > 0 ? Math.round((split_stats.test / totalImages) * 100) : 0;
+  const trainPercentage = split_details?.train?.percentage ?? 0;
+  const validPercentage = split_details?.valid?.percentage ?? 0;
+  const testPercentage = split_details?.test?.percentage ?? 0;
 
   const handleViewAll = (split = null) => {
     let url = `/projects/${project.id}/data?project=${project.id}&version=${version.id}`;
@@ -887,21 +887,21 @@ const VersionDetails = ({ version, project }) => {
                 <h4>TRAIN SET</h4>
                 <span>{trainPercentage}%</span>
               </div>
-              <p>{split_stats.train} Images</p>
+              <p>{split_details?.train?.count ?? 0} Images</p>
             </div>
             <div className={`${styles['split-card']} ${styles.valid}`} onClick={() => handleViewAll('valid')}>
               <div className={styles['split-card__header']}>
                 <h4>VALID SET</h4>
                 <span>{validPercentage}%</span>
               </div>
-              <p>{split_stats.valid} Images</p>
+              <p>{split_details?.valid?.count ?? 0} Images</p>
             </div>
             <div className={`${styles['split-card']} ${styles.test}`} onClick={() => handleViewAll('test')}>
               <div className={styles['split-card__header']}>
                 <h4>TEST SET</h4>
                 <span>{testPercentage}%</span>
               </div>
-              <p>{split_stats.test} Images</p>
+              <p>{split_details?.test?.count ?? 0} Images</p>
             </div>
           </div>
         </div>

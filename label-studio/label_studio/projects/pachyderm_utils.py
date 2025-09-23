@@ -16,7 +16,7 @@ def get_pachyderm_client():
         client = pachyderm_sdk.Client(
             host='localhost',
             port=80,
-            auth_token='257ff1a708284e9582fe3ac0a34f7864',
+            auth_token='ec405fb5b9554e6d97e3d86b96724556',
             root_certs=None,
             transaction_id=None,
             tls=False
@@ -236,18 +236,29 @@ def create_smart_match_pipeline_spec(raw_images_repo: str, annotations_repo: str
     logger.info(f"创建智能匹配管道规范: {raw_images_repo} + {annotations_repo} -> {output_repo}")
     return pipeline_spec
 
-def create_format_converter_pipeline_spec(input_repo: str, output_repo: str) -> dict:
+def create_format_converter_pipeline_spec(input_repo: str, output_repo: str, export_format: str = "YOLO", include_original: bool = True, include_augmented: bool = True) -> dict:
     """
     创建格式转换管道规范
-    将数据集处理输出转换为YOLO格式
+    将数据集处理输出转换为指定格式
     
     Args:
         input_repo: 输入仓库名（来自ls-dataset管道的输出）
         output_repo: 输出仓库名
+        export_format: 导出格式 (YOLO, COCO, VOC等) - 暂时未使用，使用默认行为
+        include_original: 是否包含原始数据 (暂时未使用)
+        include_augmented: 是否包含增强数据 (暂时未使用)
     
     Returns:
         Pachyderm管道规范字典
     """
+    # 使用最简单的命令，只传递必需的参数
+    cmd = [
+        "python",
+        "/app/converter.py",
+        "--input_dir", "/pfs/" + input_repo,
+        "--output_dir", "/pfs/out"
+    ]
+    
     pipeline_spec = {
         "pipeline": {
             "name": output_repo,
@@ -255,7 +266,7 @@ def create_format_converter_pipeline_spec(input_repo: str, output_repo: str) -> 
                 "name": "default"
             }
         },
-        "description": f"格式转换管道：将 {input_repo} 的输出转换为YOLO格式",
+        "description": f"格式转换管道：将 {input_repo} 的输出转换为格式化数据集",
         "input": {
             "pfs": {
                 "repo": input_repo,
@@ -264,12 +275,7 @@ def create_format_converter_pipeline_spec(input_repo: str, output_repo: str) -> 
         },
         "transform": {
             "image": "localhost:5000/format-converter:latest",
-            "cmd": [
-                "python",
-                "/app/converter.py",
-                "--input_dir", "/pfs/" + input_repo,
-                "--output_dir", "/pfs/out"
-            ]
+            "cmd": cmd
         }
     }
     
@@ -305,7 +311,9 @@ def wait_for_pipeline_output(client: pachyderm_sdk.Client, output_repo_name: str
                 if master_commit:
                     # 检查commit是否有文件
                     try:
-                        files = list(client.pfs.list_file(commit=master_commit, path="/"))
+                        # 使用正确的 File 对象调用 list_file
+                        file_obj = pfs.File(commit=master_commit, path="/")
+                        files = list(client.pfs.list_file(file=file_obj))
                         if files:
                             logger.info(f"管道输出完成! 仓库 {output_repo_name} 包含 {len(files)} 个文件/目录")
                             logger.info(f"输出commit: {master_commit.id}")
@@ -340,8 +348,29 @@ def wait_for_job_completion(client: pachyderm_sdk.Client, input_commit: pfs.Comm
 def get_result_from_commit(client: pachyderm_sdk.Client, output_commit: pfs.Commit, file_path: str = "/output.json") -> dict:
     """Reads and parses a JSON result file from a given commit."""
     logger.info(f"Reading result file '{file_path}' from commit {output_commit.id}")
-    result_file = client.pfs.get_file(commit=output_commit, path=file_path)
-    result_content = result_file.read().decode('utf-8')
+    # 使用正确的 File 对象调用 get_file
+    file_obj = pfs.File(commit=output_commit, path=file_path)
+    result_file = client.pfs.get_file(file=file_obj)
+    
+    # 检查返回类型并正确处理
+    content_bytes = b''
+    if hasattr(result_file, 'read'):
+        # 如果是文件类对象
+        content_bytes = result_file.read()
+    else:
+        # 如果是生成器，遍历所有数据块
+        for chunk in result_file:
+            if hasattr(chunk, 'value'):
+                # 如果是 BytesValue 对象，提取 value 属性
+                content_bytes += chunk.value
+            elif isinstance(chunk, bytes):
+                # 如果是普通字节
+                content_bytes += chunk
+            else:
+                # 尝试转换为字节
+                content_bytes += bytes(chunk)
+    
+    result_content = content_bytes.decode('utf-8')
     logger.info(f"Result content: {result_content}")
     return json.loads(result_content)
 
@@ -349,7 +378,9 @@ def list_files_in_commit(client: pachyderm_sdk.Client, commit: pfs.Commit) -> li
     """Lists all files in a given commit."""
     try:
         file_list = []
-        for file_info in client.pfs.list_file(commit=commit, path="/"):
+        # 使用正确的 File 对象调用 list_file
+        file_obj = pfs.File(commit=commit, path="/")
+        for file_info in client.pfs.list_file(file=file_obj):
             file_list.append({
                 'path': file_info.file.path,
                 'size': file_info.size_bytes,
@@ -365,7 +396,9 @@ def get_processed_files_from_version(client: pachyderm_sdk.Client, version_commi
     """Gets processed files matching the pattern from a version commit."""
     try:
         processed_files = []
-        for file_info in client.pfs.list_file(commit=version_commit, path="/"):
+        # 使用正确的 File 对象调用 list_file
+        file_obj = pfs.File(commit=version_commit, path="/")
+        for file_info in client.pfs.list_file(file=file_obj):
             file_path = file_info.file.path
             # 检查文件扩展名
             if any(file_path.lower().endswith(ext.strip('*')) for ext in file_pattern.split(',')):

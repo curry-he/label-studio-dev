@@ -415,6 +415,7 @@ class DatasetVersionSerializer(serializers.ModelSerializer):
     split_config = serializers.JSONField(required=False)  # 移除write_only，支持读写
     created_by = UserSimpleSerializer(read_only=True)
     split_stats = serializers.SerializerMethodField()
+    split_details = serializers.SerializerMethodField()  # 添加详细统计信息
     task_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -430,6 +431,7 @@ class DatasetVersionSerializer(serializers.ModelSerializer):
             'preprocessing_config',
             'augmentation_config',
             'split_stats',
+            'split_details',  # 添加新字段
             'task_count',
             'status',
             'pachyderm_input_commit',
@@ -448,14 +450,57 @@ class DatasetVersionSerializer(serializers.ModelSerializer):
         return VersionTask.objects.filter(version=obj).count()
 
     def get_split_stats(self, obj):
+        """保持与前端兼容的简单格式"""
+        train_count = VersionTask.objects.filter(version=obj, subset='train').count()
+        valid_count = VersionTask.objects.filter(version=obj, subset='valid').count()
+        test_count = VersionTask.objects.filter(version=obj, subset='test').count()
+        
+        # 添加调试日志
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"版本 {obj.id} 的 split_stats: train={train_count}, valid={valid_count}, test={test_count}")
+        
+        return {'train': train_count, 'valid': valid_count, 'test': test_count}
+    
+    def get_split_details(self, obj):
+        """提供详细的统计信息，包括百分比"""
         total_tasks = self.get_task_count(obj)
+        
+        # 添加调试日志
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"版本 {obj.id} 的总任务数: {total_tasks}")
+        
         if total_tasks == 0:
-            return {'train': 0, 'valid': 0, 'test': 0}
+            result = {
+                'train': {'count': 0, 'percentage': 0}, 
+                'valid': {'count': 0, 'percentage': 0}, 
+                'test': {'count': 0, 'percentage': 0}
+            }
+            logger.info(f"版本 {obj.id} 没有任务，返回空的 split_details: {result}")
+            return result
 
         train_count = VersionTask.objects.filter(version=obj, subset='train').count()
         valid_count = VersionTask.objects.filter(version=obj, subset='valid').count()
         test_count = VersionTask.objects.filter(version=obj, subset='test').count()
-        return {'train': train_count, 'valid': valid_count, 'test': test_count}
+        
+        result = {
+            'train': {
+                'count': train_count, 
+                'percentage': round((train_count / total_tasks) * 100) if total_tasks > 0 else 0
+            },
+            'valid': {
+                'count': valid_count, 
+                'percentage': round((valid_count / total_tasks) * 100) if total_tasks > 0 else 0
+            },
+            'test': {
+                'count': test_count, 
+                'percentage': round((test_count / total_tasks) * 100) if total_tasks > 0 else 0
+            }
+        }
+        
+        logger.info(f"版本 {obj.id} 的 split_details: {result}")
+        return result
 
 
 class VersionTaskSerializer(serializers.ModelSerializer):

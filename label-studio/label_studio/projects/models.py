@@ -2,6 +2,7 @@
 """
 import json
 import logging
+import uuid
 from typing import Any, Mapping, Optional
 
 from annoying.fields import AutoOneToOneField
@@ -1568,6 +1569,11 @@ class DatasetVersion(models.Model):
 
     def has_permission(self, user):
         return self.project.has_permission(user)
+    
+    def pachyderm_output_repo_name(self):
+        """获取 Pachyderm 输出仓库名称"""
+        # 根据版本ID生成唯一的仓库名称
+        return f"ls-dataset-{self.project.id}-v{self.id}"
 
 
 class VersionTask(models.Model):
@@ -1587,3 +1593,88 @@ class ProcessedTask(models.Model):
 
     def __str__(self):
         return f"Processed {self.original_task} for {self.version}"
+
+
+class DatasetExport(models.Model):
+    """数据集导出记录"""
+    
+    class ExportFormat(models.TextChoices):
+        YOLO = 'YOLO', 'YOLO'
+        COCO = 'COCO', 'COCO'
+        VOC = 'VOC', 'Pascal VOC'
+        CSV = 'CSV', 'CSV'
+        TSV = 'TSV', 'TSV'
+        JSON = 'JSON', 'JSON'
+        JSON_MIN = 'JSON_MIN', 'JSON (minimal)'
+        CONLL2003 = 'CONLL2003', 'CoNLL-2003'
+        BRUSH_TO_NUMPY = 'BRUSH_TO_NUMPY', 'Brush to NumPy'
+        BRUSH_TO_PNG = 'BRUSH_TO_PNG', 'Brush to PNG'
+    
+    class ExportStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PROCESSING = 'processing', 'Processing'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    dataset_version = models.ForeignKey(
+        DatasetVersion, 
+        on_delete=models.CASCADE, 
+        related_name='exports'
+    )
+    format = models.CharField(
+        max_length=32, 
+        choices=ExportFormat.choices,
+        help_text='导出格式'
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=ExportStatus.choices,
+        default=ExportStatus.PENDING
+    )
+    include_original = models.BooleanField(default=True)
+    include_augmented = models.BooleanField(default=True)
+    
+    # Pachyderm 集成字段
+    pachyderm_pipeline_name = models.CharField(
+        max_length=256, 
+        null=True, blank=True,
+        help_text='Pachyderm 转换流水线名称'
+    )
+    pachyderm_output_commit = models.CharField(
+        max_length=256, 
+        null=True, blank=True,
+        help_text='Pachyderm 输出 commit ID'
+    )
+    
+    # 导出结果
+    progress = models.FloatField(default=0.0, help_text='进度百分比')
+    file_size = models.BigIntegerField(null=True, blank=True, help_text='导出文件大小')
+    download_url = models.URLField(null=True, blank=True, help_text='下载链接')
+    
+    # 时间戳
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    
+    # 错误处理
+    error_message = models.TextField(null=True, blank=True)
+    
+    # 创建者
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, 
+        on_delete=models.SET_NULL, 
+        null=True
+    )
+    
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = (
+            'dataset_version', 
+            'format', 
+            'include_original', 
+            'include_augmented'
+        )
+    
+    def __str__(self):
+        return f"{self.dataset_version} - {self.format} ({self.status})"

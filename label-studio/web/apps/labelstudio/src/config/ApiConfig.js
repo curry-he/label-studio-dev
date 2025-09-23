@@ -78,6 +78,8 @@ export const API_CONFIG = {
     updateDatasetVersion: "PATCH:/projects/:pk/dataset-versions/:versionId",
     deleteDatasetVersion: "DELETE:/projects/:pk/dataset-versions/:versionId",
     exportDatasetVersion: "GET:/projects/:pk/dataset-versions/:versionId/export",
+    createDatasetExport: "POST:/projects/:pk/dataset-versions/:versionId/create-export/",
+    checkExportStatus: "GET:/projects/:pk/dataset-versions/:versionId/export-status/:exportId/",
     availableTransforms: "GET:/projects/:pk/dataset-versions/available-transforms",
     processedFiles: "GET:/projects/:pk/dataset-versions/:versionId/processed-files",
     retryProcessing: "POST:/projects/:pk/dataset-versions/:versionId/retry-processing",

@@ -62,9 +62,13 @@ _api_urlpatterns += [
     path('<int:project_pk>/dataset-versions/', DatasetVersionViewSet.as_view({'get': 'list', 'post': 'create'}), name='datasetversion-list'),
     path('<int:project_pk>/dataset-versions/<int:pk>/', DatasetVersionViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'}), name='datasetversion-detail'),
     path('<int:project_pk>/dataset-versions/<int:pk>/auto-split/', DatasetVersionViewSet.as_view({'post': 'auto_split'}), name='datasetversion-auto-split'),
+    path('<int:project_pk>/dataset-versions/<int:pk>/debug-split/', DatasetVersionViewSet.as_view({'get': 'debug_split'}), name='datasetversion-debug-split'),
+    path('<int:project_pk>/dataset-versions/<int:pk>/create-export/', DatasetVersionViewSet.as_view({'post': 'create_export'}), name='datasetversion-create-export'),
+    path('<int:project_pk>/dataset-versions/<int:pk>/export-status/<str:export_id>/', DatasetVersionViewSet.as_view({'get': 'export_status'}), name='datasetversion-export-status'),
     path('<int:project_pk>/dataset-versions/<int:pk>/export/', DatasetVersionViewSet.as_view({'get': 'export'}), name='datasetversion-export'),
     path('<int:project_pk>/dataset-versions/<int:pk>/processed-files/', DatasetVersionViewSet.as_view({'get': 'get_processed_files'}), name='datasetversion-processed-files'),
     path('<int:project_pk>/dataset-versions/<int:pk>/retry-processing/', DatasetVersionViewSet.as_view({'post': 'retry_processing'}), name='datasetversion-retry-processing'),
+    path('<int:project_pk>/dataset-versions/<int:pk>/download-export/<str:pipeline_name>/<str:commit_id>/', DatasetVersionViewSet.as_view({'get': 'download_export'}), name='datasetversion-download-export'),
     path('<int:project_pk>/dataset-versions/available-transforms/', DatasetVersionViewSet.as_view({'get': 'available_transforms'}), name='datasetversion-available-transforms'),
 ]
 _api_urlpatterns += router.urls

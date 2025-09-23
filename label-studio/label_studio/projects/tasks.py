@@ -93,7 +93,7 @@ def process_version_creation(version_id):
         
         # 等待足够时间让管道处理（根据数据量调整）
         import time
-        time.sleep(180)  # 等待3分钟
+        time.sleep(60)  # 等待3分钟
         
         # 使用更简单可靠的方法检查输出
         try:
@@ -122,7 +122,7 @@ def process_version_creation(version_id):
             logger.error(f"检查智能匹配输出失败: {e}")
             # 再等待一段时间重试
             logger.info("等待更长时间后重试...")
-            time.sleep(120)  # 再等2分钟
+            time.sleep(60)  # 再等2分钟
             try:
                 # 确保 master_branch 对象在重试作用域中
                 master_branch = pfs.Branch(repo=pfs.Repo(name=output_repo), name="master")
@@ -160,13 +160,15 @@ def process_version_creation(version_id):
         try:
             # 直接检查format-converter的master分支
             format_master_branch = pfs.Branch(repo=pfs.Repo(name=format_converter_repo), name="master")
-            format_files = list(client.pfs.list_file(branch=format_master_branch, path="/"))
+            format_branch_info = client.pfs.inspect_branch(branch=format_master_branch)
+            format_output_commit = format_branch_info.head
+            
+            # 使用正确的方式列出文件
+            format_file_obj = pfs.File(commit=format_output_commit, path="/")
+            format_files = list(client.pfs.list_file(file=format_file_obj))
             
             if format_files:
                 logger.info(f"格式转换管道输出确认: {len(format_files)} 个文件/目录")
-                # 获取format-converter的最新commit
-                format_branch_info = client.pfs.inspect_branch(branch=format_master_branch)
-                format_output_commit = format_branch_info.head
                 logger.info(f"格式转换输出commit: {format_output_commit.id}")
             else:
                 raise Exception(f"格式转换仓库 {format_converter_repo} 没有文件")
