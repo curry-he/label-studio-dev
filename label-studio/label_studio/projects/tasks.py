@@ -178,38 +178,25 @@ def process_dataset_export(export_id, version_id):
         created_pipelines.append(ls_dataset_repo)
         logger.info(f"✅ 数据处理管道创建完成: {ls_dataset_repo}")
         
-        # 5. 等待数据处理管道完成
-        logger.info(f"⏳ 等待数据处理完成...")
-        import time
-        time.sleep(30)  # 等待1分钟
+        # 5. 事件驱动等待数据处理管道完成
+        logger.info(f"⏳ 开始事件驱动等待数据处理完成...")
+        print("等待数据处理管道完成")
+        success, dataset_output_commit = pachu.wait_for_pipeline_job_completion(
+            client, ls_dataset_repo, timeout=60  # 1分钟超时
+        )
         
-        # 检查数据处理输出
+        print(success)
+        if not success:
+            raise Exception(f"数据处理管道 {ls_dataset_repo} 执行失败")
+        
+        # 验证输出
         try:
-            master_branch = pfs.Branch(repo=pfs.Repo(name=ls_dataset_repo), name="master")
-            branch_info = client.pfs.inspect_branch(branch=master_branch)
-            dataset_output_commit = branch_info.head
-            
             file_obj = pfs.File(commit=dataset_output_commit, path="/")
             files = list(client.pfs.list_file(file=file_obj))
-            
-            if files:
-                logger.info(f"📊 数据处理完成: {len(files)} 个文件/目录")
-            else:
-                raise Exception(f"数据处理管道 {ls_dataset_repo} 没有输出")
-                
+            logger.info(f"📊 数据处理完成: {len(files)} 个文件/目录")
         except Exception as e:
-            logger.warning(f"第一次检查失败，等待更长时间: {e}")
-            time.sleep(30)  # 再等1分钟
-            
-            master_branch = pfs.Branch(repo=pfs.Repo(name=ls_dataset_repo), name="master")
-            branch_info = client.pfs.inspect_branch(branch=master_branch)
-            dataset_output_commit = branch_info.head
-            
-            file_obj = pfs.File(commit=dataset_output_commit, path="/")
-            files = list(client.pfs.list_file(file=file_obj))
-            
-            if not files:
-                raise Exception(f"数据处理管道超时，没有生成输出")
+            logger.error(f"验证数据处理输出失败: {e}")
+            raise Exception(f"数据处理管道输出验证失败: {e}")
         
         # 6. 创建格式转换管道
         format_converter_spec = pachu.create_format_converter_pipeline_spec(
@@ -221,27 +208,23 @@ def process_dataset_export(export_id, version_id):
         created_pipelines.append(format_converter_repo)
         logger.info(f"✅ 格式转换管道创建完成: {format_converter_repo}")
         
-        # 7. 等待格式转换管道完成
-        logger.info(f"⏳ 等待格式转换完成...")
-        time.sleep(30)  # 等待1分钟
+        # 7. 事件驱动等待格式转换管道完成
+        logger.info(f"⏳ 开始事件驱动等待格式转换完成...")
+        success, format_output_commit = pachu.wait_for_pipeline_job_completion(
+            client, format_converter_repo, timeout=60  # 1分钟超时
+        )
         
-        # 检查格式转换输出
+        if not success:
+            raise Exception(f"格式转换管道 {format_converter_repo} 执行失败")
+        
+        # 验证格式转换输出
         try:
-            format_master_branch = pfs.Branch(repo=pfs.Repo(name=format_converter_repo), name="master")
-            format_branch_info = client.pfs.inspect_branch(branch=format_master_branch)
-            format_output_commit = format_branch_info.head
-            
             format_file_obj = pfs.File(commit=format_output_commit, path="/")
             format_files = list(client.pfs.list_file(file=format_file_obj))
-            
-            if format_files:
-                logger.info(f"📦 格式转换完成: {len(format_files)} 个文件/目录")
-            else:
-                raise Exception(f"格式转换管道 {format_converter_repo} 没有输出")
-                
+            logger.info(f"📦 格式转换完成: {len(format_files)} 个文件/目录")
         except Exception as e:
-            logger.error(f"格式转换失败: {e}")
-            raise
+            logger.error(f"验证格式转换输出失败: {e}")
+            raise Exception(f"格式转换管道输出验证失败: {e}")
         
         # 8. 生成下载链接（使用正确的URL格式）
         download_url = f"/api/projects/{project_id}/dataset-versions/{version_id}/download-export/{format_converter_repo}/{format_output_commit.id}/"
@@ -260,6 +243,8 @@ def process_dataset_export(export_id, version_id):
         logger.info(f"  - 下载链接: {download_url}")
         logger.info(f"  - 输出仓库: {format_converter_repo}")
         logger.info(f"  - 输出提交: {format_output_commit.id}")
+        logger.info(f"  - 数据处理时间: 事件驱动，精确响应")
+        logger.info(f"  - 格式转换时间: 事件驱动，精确响应")
         
         # 10. 清理管道（可选，如果需要立即清理）
         # 注意：这里可以选择是否立即清理管道，或者在下载完成后清理

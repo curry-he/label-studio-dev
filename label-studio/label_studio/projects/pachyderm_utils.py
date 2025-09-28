@@ -478,3 +478,212 @@ def cleanup_pipeline_safely(client: pachyderm_sdk.Client, pipeline_name: str):
             logger.warning(f"管道 {pipeline_name} 删除失败")
     else:
         logger.info(f"管道 {pipeline_name} 不存在，无需删除")
+
+
+def get_state_name(state):
+    """安全地获取状态名称的通用函数"""
+    if hasattr(state, 'name'):
+        return state.name
+    elif isinstance(state, int):
+        # 如果是整数，根据JobState枚举映射
+        state_mapping = {
+            0: 'JOB_STATE_UNKNOWN',
+            1: 'JOB_CREATED', 
+            2: 'JOB_STARTING',
+            3: 'JOB_RUNNING',
+            4: 'JOB_FAILURE', 
+            5: 'JOB_SUCCESS',
+            6: 'JOB_KILLED',
+            7: 'JOB_EGRESSING',
+            8: 'JOB_FINISHING',
+            9: 'JOB_UNRUNNABLE'
+        }
+        return state_mapping.get(state, f'UNKNOWN_STATE_{state}')
+    else:
+        return str(state)
+
+
+def monitor_pipeline_jobs(client: pachyderm_sdk.Client, pipeline_name: str, callback=None, timeout: int = 600):
+    """
+    通过轮询监听管道Job状态变化的健壮版本
+
+    Args:
+        client: Pachyderm客户端
+        pipeline_name: 要监听的管道名称
+        callback: 回调函数，参数为(job_info, job_state)
+        timeout: 监听超时时间（秒）
+        
+    Returns:
+        (final_state, job_info): 最终的Job状态和Job信息，超时则job_info为None
+    """
+    from pachyderm_sdk.api import pps
+    
+    logger.info(f"🔍 开始监听管道 {pipeline_name} 的Job状态 (轮询模式)...")
+    
+    pipeline = pps.Pipeline(name=pipeline_name)
+    start_time = time.time()
+    
+    last_job_id = None
+    last_state_name = None
+
+    while time.time() - start_time < timeout:
+        try:
+            # 获取该管道最新的一个Job
+            jobs = list(client.pps.list_job(pipeline=pipeline, details=True, number=1))
+            
+            if not jobs:
+                logger.info(f"📊 管道 {pipeline_name} 暂时没有Job，等待Job创建...")
+                time.sleep(3)
+                continue
+
+            latest_job = jobs[0]
+            job_id = latest_job.job.id
+            state_name = get_state_name(latest_job.state)
+
+            # 仅在状态或Job ID变化时打印日志，避免日志刷屏
+            if job_id != last_job_id or state_name != last_state_name:
+                logger.info(f"📊 管道 {pipeline_name} 最新Job状态: {state_name} (Job ID: {job_id})")
+                last_job_id = job_id
+                last_state_name = state_name
+            
+            # 调用回调函数（如果提供）
+            if callback:
+                try:
+                    callback(latest_job, latest_job.state)
+                except Exception as e:
+                    logger.warning(f"回调函数执行失败: {e}")
+
+            # 检查是否完成或失败 - 使用整数值比较更可靠
+            state_value = latest_job.state if isinstance(latest_job.state, int) else latest_job.state.value if hasattr(latest_job.state, 'value') else int(latest_job.state)
+            
+            if state_value == 5:  # JOB_SUCCESS
+                logger.info(f"✅ 管道 {pipeline_name} Job成功完成!")
+                return latest_job.state, latest_job
+            elif state_value == 4:  # JOB_FAILURE
+                logger.error(f"❌ 管道 {pipeline_name} Job执行失败!")
+                return latest_job.state, latest_job
+            elif state_value == 6:  # JOB_KILLED
+                logger.warning(f"⚠️ 管道 {pipeline_name} Job被终止!")
+                return latest_job.state, latest_job
+            
+            # 如果未完成，则等待一段时间再轮询
+            time.sleep(10)
+
+        except Exception as e:
+            logger.warning(f"轮询管道 {pipeline_name} Job状态时出错: {e}, 10秒后重试...")
+            time.sleep(10)
+
+    # 如果 while 循环正常结束，说明超时
+    logger.warning(f"⏰ 管道 {pipeline_name} Job监听超时 ({timeout}s)")
+    # 返回一个明确的未知状态和空的job_info
+    return pps.JobState.JOB_STATE_UNKNOWN, None
+
+
+def wait_for_pipeline_job_completion(client: pachyderm_sdk.Client, pipeline_name: str, timeout: int = 600):
+    """等待管道Job完成的事件驱动版本
+    
+    Args:
+        client: Pachyderm客户端
+        pipeline_name: 管道名称
+        timeout: 超时时间（秒）
+        
+    Returns:
+        (success: bool, output_commit: pfs.Commit or None)
+    """
+
+    print("开始监听")
+    logger.info(f"⏳ 等待管道 {pipeline_name} Job完成 (最大等待时间: {timeout}s)...")
+    
+    def job_callback(job_info, job_state):
+        """在Job状态变化时的回调函数"""
+        # 安全地获取状态名称
+        state_name = get_state_name(job_state)
+        logger.info(f"  📈 Job进度更新: {state_name}")
+        
+        # 显示数据处理进度（如果可用）
+        if hasattr(job_info, 'data_processed') and hasattr(job_info, 'data_total'):
+            if job_info.data_total > 0:
+                progress = (job_info.data_processed / job_info.data_total) * 100
+                logger.info(f"  📊 数据处理进度: {job_info.data_processed}/{job_info.data_total} ({progress:.1f}%)")
+        
+        # 显示其他状态信息 - 使用整数值比较
+        state_value = job_state if isinstance(job_state, int) else job_state.value if hasattr(job_state, 'value') else int(job_state)
+        
+        if state_value == 3:  # JOB_RUNNING
+            logger.info(f"  🔄 Job正在运行中...")
+        elif state_value == 8:  # JOB_FINISHING
+            logger.info(f"  🏁 Job即将完成...")
+        elif state_value == 7:  # JOB_EGRESSING
+            logger.info(f"  📤 Job正在输出结果...")
+    
+    logger.info(f"🛠️ 调用 monitor_pipeline_jobs 开始监听...")
+    
+    try:
+        final_state, job_info = monitor_pipeline_jobs(
+            client, pipeline_name, callback=job_callback, timeout=timeout
+        )
+        
+        logger.info(f"📊 monitor_pipeline_jobs 返回: final_state={get_state_name(final_state)}, job_info={'available' if job_info else 'None'}")
+        print(f"📊 monitor_pipeline_jobs 返回: final_state={get_state_name(final_state)}, job_info={'available' if job_info else 'None'}")
+        
+        if job_info is None:
+            logger.error(f"❌ 管道 {pipeline_name} 监听失败，没有获取到Job信息")
+            return False, None
+        
+        # 安全地检查最终状态
+        state_value = final_state if isinstance(final_state, int) else final_state.value if hasattr(final_state, 'value') else int(final_state)
+        
+        if state_value == 5:  # JOB_SUCCESS
+            # 获取输出commit
+            if hasattr(job_info, 'output_commit') and job_info.output_commit:
+                output_commit = job_info.output_commit
+                logger.info(f"✅ 管道 {pipeline_name} 成功完成，输出commit: {output_commit.id}")
+                return True, output_commit
+            else:
+                logger.warning(f"⚠️ 管道 {pipeline_name} 显示成功，但没有输出commit")
+                # 尝试手动获取输出commit
+                output_commit = get_pipeline_output_commit(client, pipeline_name)
+                if output_commit:
+                    logger.info(f"✅ 手动获取到输出commit: {output_commit.id}")
+                    return True, output_commit
+                else:
+                    logger.error(f"❌ 无法获取管道 {pipeline_name} 的输出commit")
+                    return False, None
+        else:
+            state_name = get_state_name(final_state)
+            logger.error(f"❌ 管道 {pipeline_name} 执行失败，最终状态: {state_name}")
+            return False, None
+            
+    except Exception as e:
+        logger.error(f"等待管道 {pipeline_name} 完成时出错: {e}", exc_info=True)
+        return False, None
+
+
+def get_pipeline_output_commit(client: pachyderm_sdk.Client, pipeline_name: str):
+    """获取管道的最新输出commit
+    
+    Args:
+        client: Pachyderm客户端
+        pipeline_name: 管道名称
+        
+    Returns:
+        最新的输出commit，如果没有则返回None
+    """
+    try:
+        # 检查输出仓库是否存在
+        repo_info = client.pfs.inspect_repo(repo=pfs.Repo(name=pipeline_name))
+        
+        if repo_info.branches:
+            # 查找master分支
+            for branch in repo_info.branches:
+                if branch.branch.name == "master":
+                    master_commit = branch.head
+                    logger.info(f"获取到管道 {pipeline_name} 的输出commit: {master_commit.id}")
+                    return master_commit
+        
+        logger.warning(f"管道 {pipeline_name} 没有找到master分支或输出")
+        return None
+        
+    except Exception as e:
+        logger.error(f"获取管道 {pipeline_name} 输出commit失败: {e}")
+        return None
