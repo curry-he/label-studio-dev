@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 @shared_task
 def process_version_creation(version_id):
     """
-    使用智能匹配模式的Pachyderm管道处理数据集版本
-    通过标注数据中的原始文件名信息匹配图片和标注进行处理
+    创建数据集版本配置文件并提交到annotations仓库
+    不再直接创建和运行管道，而是在导出时动态创建管道
     """
     from django.utils import timezone
     
@@ -30,27 +30,36 @@ def process_version_creation(version_id):
         client = pachu.get_pachyderm_client()
         project_id = version.project.id
         
-        logger.info(f"📊 开始处理版本 {version_id}，项目 {project_id} (智能匹配模式)")
+        logger.info(f"📊 开始创建版本配置 {version_id}，项目 {project_id} (配置文件模式)")
 
-        # 2. 使用智能匹配模式的仓库配置
+        # 2. 仓库配置（仅用于配置文件）
         raw_images_repo = "raw_images"      # Source Storage repo name
-        annotations_repo = "annotations"   # Target Storage repo name  
-        output_repo = f"ls-dataset-{project_id}-v{version_id}"
+        annotations_repo = "annotations"   # Target Storage repo name
+        # 注意：不再预先创建输出仓库，而是在导出时动态创建
         
-        logger.info(f"📂 智能匹配输入仓库: {raw_images_repo} (原始图片) + {annotations_repo} (标注)")
-        logger.info(f"📂 输出仓库: {output_repo}")
+        logger.info(f"📋 版本配置:")
+        logger.info(f"  - 原始图片仓库: {raw_images_repo}")
+        logger.info(f"  - 标注仓库: {annotations_repo}")
 
-        # 3. 准备处理配置（包含前端传递的预处理、增强和分割配置）
+        # 3. 准备处理配置（不包含管道执行信息）
         split_config = version.split_config or {"enabled": False}
         
         config_for_pfs = {
             "version_id": version_id,
             "project_id": project_id,
+            "status": "config_created",  # 标记为配置已创建
+            "created_mode": "deferred_processing",  # 延迟处理模式
             "smart_match_mode": True,
             "preprocessing": version.preprocessing_config or [],
             "augmentation": version.augmentation_config or [],
             "split": split_config,
-            "created_at": timezone.now().isoformat()
+            "created_at": timezone.now().isoformat(),
+            "pipelines": {
+                "raw_images_repo": raw_images_repo,
+                "annotations_repo": annotations_repo,
+                "ls_dataset_template": f"ls-dataset-{project_id}-v{version_id}",
+                "format_converter_template": f"format-converter-yolo-{project_id}-v{version_id}"
+            }
         }
         
         # 如果启用了数据集分割但没有指定随机种子，添加默认种子
@@ -70,184 +79,245 @@ def process_version_creation(version_id):
         if split_config.get('enabled'):
             logger.info(f"  - 分割详情: {split_config}")
 
-        # 4. 提交配置到annotations仓库（智能匹配脚本从这里读取config.json）
+        # 4. 提交配置到annotations仓库（不启动管道）
         config_commit = pachu.commit_processing_config_to_repo(
             client, annotations_repo, config_for_pfs
         )
         logger.info(f"配置已提交到 {annotations_repo}, commit: {config_commit.id}")
 
-        # 5. 创建智能匹配管道规范
+        # 5. 更新版本状态为配置已创建
+        version.pachyderm_input_commit = config_commit.id
+        version.status = DatasetVersion.Status.CREATED  # 保持为CREATED状态
+        version.processed_at = timezone.now()
+        version.save()
+        
+        logger.info(f"🎉 版本 {version_id} 配置创建完成")
+        logger.info(f"  - 配置文件: {annotations_repo}/_processing_config/config.json")
+        logger.info(f"  - 配置提交ID: {config_commit.id}")
+        logger.info(f"  - 状态: 等待导出时创建管道")
+
+    except Exception as e:
+        logger.error(f"版本 {version_id} 配置创建失败: {e}", exc_info=True)
+        if version:
+            version.status = DatasetVersion.Status.FAILED
+            version.error_message = f"配置创建失败: {str(e)}"
+            version.save()
+
+
+@shared_task
+def process_dataset_export(export_id, version_id):
+    """
+    处理数据集导出：动态创建管道、处理数据、生成下载链接
+    导出完成后清理创建的管道以节省资源
+    """
+    from django.utils import timezone
+    from .models import DatasetExport, DatasetVersion
+    from pachyderm_sdk.api import pfs, pps
+    
+    logger.info(f"🚀 开始处理导出任务: export_id={export_id}, version_id={version_id}")
+    
+    export_record = None
+    version = None
+    created_pipelines = []  # 记录创建的管道，用于后续清理
+    
+    try:
+        # 1. 获取导出记录和版本信息
+        export_record = DatasetExport.objects.get(id=export_id)
+        version = DatasetVersion.objects.get(id=version_id)
+        
+        logger.info(f"📝 导出信息: format={export_record.format}, version={version.name}")
+        
+        # 2. 连接Pachyderm
+        logger.info(f"🔗 开始连接Pachyderm...")
+        client = pachu.get_pachyderm_client()
+        project_id = version.project.id
+        
+        # 3. 从配置文件中获取管道模板信息
+        annotations_repo = "annotations"
+        
+        # 从annotations仓库中读取配置文件
+        try:
+            config_commit = pfs.Commit(repo=pfs.Repo(name=annotations_repo), id=version.pachyderm_input_commit)
+            config_file_obj = pfs.File(commit=config_commit, path="/_processing_config/config.json")
+            
+            config_content = b''
+            for chunk in client.pfs.get_file(file=config_file_obj):
+                if hasattr(chunk, 'value'):
+                    config_content += chunk.value
+                elif isinstance(chunk, bytes):
+                    config_content += chunk
+                else:
+                    config_content += bytes(chunk)
+                    
+            config_data = json.loads(config_content.decode('utf-8'))
+            logger.info(f"📋 读取版本配置成功")
+            
+        except Exception as e:
+            logger.error(f"读取版本配置失败: {e}")
+            raise Exception(f"无法读取版本配置: {e}")
+        
+        # 4. 创建数据处理管道
+        pipelines = config_data.get('pipelines', {})
+        raw_images_repo = pipelines.get('raw_images_repo', 'raw_images')
+        ls_dataset_repo = pipelines.get('ls_dataset_template', f"ls-dataset-{project_id}-v{version_id}")
+        format_converter_repo = pipelines.get('format_converter_template', f"format-converter-yolo-{project_id}-v{version_id}")
+        
+        logger.info(f"🏗️ 开始创建处理管道:")
+        logger.info(f"  - 数据处理管道: {ls_dataset_repo}")
+        logger.info(f"  - 格式转换管道: {format_converter_repo}")
+        
+        # 创建智能匹配数据处理管道
         pipeline_spec = pachu.create_smart_match_pipeline_spec(
             raw_images_repo=raw_images_repo,
-            annotations_repo=annotations_repo, 
-            output_repo=output_repo,
-            processing_config=config_for_pfs
+            annotations_repo=annotations_repo,
+            output_repo=ls_dataset_repo,
+            processing_config=config_data
         )
-
-        # 6. 创建或更新管道
+        
         pachu.create_or_update_pipeline(client, pipeline_spec)
-        logger.info(f"智能匹配管道已创建/更新: {output_repo}")
-
-        # 7. 等待智能匹配管道完成并检查输出
-        logger.info(f"等待智能匹配管道 {output_repo} 处理完成...")
+        created_pipelines.append(ls_dataset_repo)
+        logger.info(f"✅ 数据处理管道创建完成: {ls_dataset_repo}")
         
-        # 等待足够时间让管道处理（根据数据量调整）
+        # 5. 等待数据处理管道完成
+        logger.info(f"⏳ 等待数据处理完成...")
         import time
-        time.sleep(60)  # 等待3分钟
+        time.sleep(30)  # 等待1分钟
         
-        # 使用更简单可靠的方法检查输出
+        # 检查数据处理输出
         try:
-            from pachyderm_sdk.api import pfs
-            
-            # 创建 master branch 对象
-            master_branch = pfs.Branch(repo=pfs.Repo(name=output_repo), name="master")
-            
-            # 获取master分支的最新commit
+            master_branch = pfs.Branch(repo=pfs.Repo(name=ls_dataset_repo), name="master")
             branch_info = client.pfs.inspect_branch(branch=master_branch)
-            latest_commit = branch_info.head
+            dataset_output_commit = branch_info.head
             
-            # 创建 File 对象用于 list_file 调用
-            file_obj = pfs.File(commit=latest_commit, path="/")
+            file_obj = pfs.File(commit=dataset_output_commit, path="/")
             files = list(client.pfs.list_file(file=file_obj))
             
             if files:
-                logger.info(f"智能匹配管道输出确认: {len(files)} 个文件/目录")
-                # 使用已获取的commit
-                output_commit = latest_commit
-                logger.info(f"输出commit: {output_commit.id}")
+                logger.info(f"📊 数据处理完成: {len(files)} 个文件/目录")
             else:
-                raise Exception(f"输出仓库 {output_repo} 没有文件")
+                raise Exception(f"数据处理管道 {ls_dataset_repo} 没有输出")
                 
         except Exception as e:
-            logger.error(f"检查智能匹配输出失败: {e}")
-            # 再等待一段时间重试
-            logger.info("等待更长时间后重试...")
-            time.sleep(60)  # 再等2分钟
-            try:
-                # 确保 master_branch 对象在重试作用域中
-                master_branch = pfs.Branch(repo=pfs.Repo(name=output_repo), name="master")
-                
-                # 重新获取最新commit并使用正确的 File 对象调用list_file
-                branch_info = client.pfs.inspect_branch(branch=master_branch)
-                latest_commit = branch_info.head
-                file_obj = pfs.File(commit=latest_commit, path="/")
-                files = list(client.pfs.list_file(file=file_obj))
-                if files:
-                    logger.info(f"重试成功: {len(files)} 个文件/目录")
-                    output_commit = latest_commit
-                else:
-                    raise Exception(f"重试后仍然没有数据: {output_repo}")
-            except Exception as retry_e:
-                logger.error(f"重试也失败: {retry_e}")
-                raise
-
-        # 8. 创建format-converter管道
-        format_converter_repo = f"format-converter-yolo-{project_id}-v{version_id}"
-        logger.info(f"📋 创建格式转换管道: {format_converter_repo}")
+            logger.warning(f"第一次检查失败，等待更长时间: {e}")
+            time.sleep(30)  # 再等1分钟
+            
+            master_branch = pfs.Branch(repo=pfs.Repo(name=ls_dataset_repo), name="master")
+            branch_info = client.pfs.inspect_branch(branch=master_branch)
+            dataset_output_commit = branch_info.head
+            
+            file_obj = pfs.File(commit=dataset_output_commit, path="/")
+            files = list(client.pfs.list_file(file=file_obj))
+            
+            if not files:
+                raise Exception(f"数据处理管道超时，没有生成输出")
         
+        # 6. 创建格式转换管道
         format_converter_spec = pachu.create_format_converter_pipeline_spec(
-            input_repo=output_repo,  # 使用智能匹配的输出作为输入
+            input_repo=ls_dataset_repo,
             output_repo=format_converter_repo
         )
         
         pachu.create_or_update_pipeline(client, format_converter_spec)
-        logger.info(f"格式转换管道已创建/更新: {format_converter_repo}")
-
-        # 9. 等待格式转换管道输出仓库有数据  
-        logger.info(f"等待格式转换管道 {format_converter_repo} 处理完成...")
-        time.sleep(120)  # 等待2分钟
+        created_pipelines.append(format_converter_repo)
+        logger.info(f"✅ 格式转换管道创建完成: {format_converter_repo}")
         
+        # 7. 等待格式转换管道完成
+        logger.info(f"⏳ 等待格式转换完成...")
+        time.sleep(30)  # 等待1分钟
+        
+        # 检查格式转换输出
         try:
-            # 直接检查format-converter的master分支
             format_master_branch = pfs.Branch(repo=pfs.Repo(name=format_converter_repo), name="master")
             format_branch_info = client.pfs.inspect_branch(branch=format_master_branch)
             format_output_commit = format_branch_info.head
             
-            # 使用正确的方式列出文件
             format_file_obj = pfs.File(commit=format_output_commit, path="/")
             format_files = list(client.pfs.list_file(file=format_file_obj))
             
             if format_files:
-                logger.info(f"格式转换管道输出确认: {len(format_files)} 个文件/目录")
-                logger.info(f"格式转换输出commit: {format_output_commit.id}")
+                logger.info(f"📦 格式转换完成: {len(format_files)} 个文件/目录")
             else:
-                raise Exception(f"格式转换仓库 {format_converter_repo} 没有文件")
-        except Exception as e:
-            logger.error(f"检查格式转换输出失败: {e}")
-            raise
-
-        # 10. 存储结果
-        version.pachyderm_input_commit = config_commit.id
-        version.pachyderm_output_commit = format_output_commit.id  # 保存最终的格式转换输出
-        version.processed_at = timezone.now()
-        
-        # 9. 获取处理结果报告
-        try:
-            from pachyderm_sdk.api import pfs
-            report_commit = pfs.Commit(
-                repo=pfs.Repo(name=output_repo),
-                id=output_commit.id
-            )
-            
-            try:
-                # 尝试获取处理报告（智能匹配生成的报告文件名包含哈希）
-                report_files = pachu.list_files_in_commit(client, report_commit)
-                report_file = None
-                for file_info in report_files:
-                    if 'processing_report' in file_info['path'] and file_info['path'].endswith('.json'):
-                        report_file = file_info['path']
-                        break
+                raise Exception(f"格式转换管道 {format_converter_repo} 没有输出")
                 
-                if report_file:
-                    processing_report = pachu.get_result_from_commit(client, report_commit, report_file)
-                    logger.info(f"获取处理报告: {processing_report}")
-                    
-                    # 验证智能匹配处理结果
-                    if processing_report.get('intelligent_matching'):
-                        # 检查数据集分割结果
-                        if processing_report.get('dataset_split_enabled') and processing_report.get('split_results'):
-                            split_results = processing_report['split_results']
-                            total_matched = processing_report.get('total_matched_pairs', 0)
-                            logger.info(f"智能匹配处理成功: {total_matched} 个图片-标注对")
-                            logger.info(f"数据集分割结果:")
-                            for split_name, result in split_results.items():
-                                logger.info(f"  - {split_name.upper()}: {result['processed']}/{result['total']} 成功处理")
-                        elif processing_report.get('matched_pairs', 0) > 0 or processing_report.get('processed_pairs', 0) > 0:
-                            # 传统模式或旧格式的处理报告
-                            matched_count = processing_report.get('matched_pairs', processing_report.get('processed_pairs', 0))
-                            logger.info(f"智能匹配处理成功: {matched_count} 个图片-标注对")
-                            logger.info("使用传统模式处理（未启用数据集分割）")
-                        else:
-                            logger.warning("智能匹配处理可能存在问题，请检查图片文件名和标注数据的匹配情况")
-                    else:
-                        logger.warning("智能匹配处理可能存在问题，请检查图片文件名和标注数据的匹配情况")
-                else:
-                    logger.warning("未找到处理报告文件")
-                    
-            except Exception as e:
-                logger.warning(f"无法获取处理报告: {e}")
-                processing_report = {"status": "completed", "intelligent_matching": True}
-            
-            # 获取处理后的文件列表
-            result_files = pachu.list_files_in_commit(client, report_commit)
-            logger.info(f"输出文件数量: {len(result_files)}")
-            
         except Exception as e:
-            logger.warning(f"获取处理结果时出错: {e}")
-
-        # 10. 完成版本处理
-        version.status = DatasetVersion.Status.COMPLETED
-        version.save()
+            logger.error(f"格式转换失败: {e}")
+            raise
         
-        logger.info(f"版本 {version_id} 处理完成 (智能匹配+格式转换模式)")
-        logger.info(f"  - 数据处理: {raw_images_repo} + {annotations_repo} -> {output_repo}")
-        logger.info(f"  - 格式转换: {output_repo} -> {format_converter_repo}")
-        logger.info(f"  - 最终输出: {format_converter_repo} (commit: {format_output_commit.id})")
-        logger.info(f"  - 数据集分割: {'启用' if split_config.get('enabled') else '禁用'}")
-
+        # 8. 生成下载链接（使用正确的URL格式）
+        download_url = f"/api/projects/{project_id}/dataset-versions/{version_id}/download-export/{format_converter_repo}/{format_output_commit.id}/"
+        
+        # 9. 更新导出记录
+        export_record.pachyderm_pipeline_name = format_converter_repo
+        export_record.pachyderm_output_commit = format_output_commit.id
+        export_record.download_url = download_url
+        export_record.status = DatasetExport.ExportStatus.COMPLETED
+        export_record.completed_at = timezone.now()
+        export_record.progress = 100.0
+        export_record.save()
+        
+        logger.info(f"🎉 导出任务完成!")
+        logger.info(f"  - 导出格式: {export_record.format}")
+        logger.info(f"  - 下载链接: {download_url}")
+        logger.info(f"  - 输出仓库: {format_converter_repo}")
+        logger.info(f"  - 输出提交: {format_output_commit.id}")
+        
+        # 10. 清理管道（可选，如果需要立即清理）
+        # 注意：这里可以选择是否立即清理管道，或者在下载完成后清理
+        logger.info("💡 管道清理将在下载完成后进行")
+        
     except Exception as e:
-        logger.error(f"版本 {version_id} 处理失败: {e}", exc_info=True)
-        if version:
-            version.status = DatasetVersion.Status.FAILED
-            version.error_message = f"智能匹配处理失败: {str(e)}"
-            version.save()
+        logger.error(f"导出任务失败: {e}", exc_info=True)
+        
+        if export_record:
+            export_record.status = DatasetExport.ExportStatus.FAILED
+            export_record.error_message = f"导出失败: {str(e)}"
+            export_record.completed_at = timezone.now()
+            export_record.save()
+        
+        # 清理已创建的管道
+        if created_pipelines and client:
+            logger.info("🧹 清理已创建的管道...")
+            cleanup_pipelines(client, created_pipelines)
+
+
+def cleanup_pipelines(client, pipeline_names):
+    """清理指定的管道"""
+    for pipeline_name in pipeline_names:
+        pachu.cleanup_pipeline_safely(client, pipeline_name)
+            
+
+@shared_task
+def cleanup_export_pipelines(export_id):
+    """
+    导出下载完成后清理相关管道
+    """
+    import time
+    
+    # 等待10秒，确保下载完成
+    logger.info(f"🧹 等待10秒后开始清理导出 {export_id} 的相关管道...")
+    time.sleep(10)
+    
+    logger.info(f"🧹 开始清理导出 {export_id} 的相关管道")
+    
+    try:
+        from .models import DatasetExport
+        export_record = DatasetExport.objects.get(id=export_id)
+        
+        if not export_record.pachyderm_pipeline_name:
+            logger.info(f"导出 {export_id} 没有关联的管道，无需清理")
+            return
+            
+        client = pachu.get_pachyderm_client()
+        pipeline_name = export_record.pachyderm_pipeline_name
+        
+        # 推断数据处理管道名称（格式转换管道的前级）
+        if pipeline_name.startswith("format-converter-yolo-"):
+            dataset_pipeline_name = pipeline_name.replace("format-converter-yolo-", "ls-dataset-")
+            cleanup_pipelines(client, [dataset_pipeline_name, pipeline_name])
+        else:
+            cleanup_pipelines(client, [pipeline_name])
+        
+        logger.info(f"✅ 导出 {export_id} 的管道清理完成")
+        
+    except Exception as e:
+        logger.error(f"清理导出 {export_id} 的管道失败: {e}", exc_info=True)

@@ -1009,45 +1009,54 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='create-export')
     def create_export(self, request, pk=None, project_pk=None):
-        """创建数据集导出任务，直接使用已处理的format-converter输出"""
-        from .pachyderm_utils import get_pachyderm_client, list_files_in_commit
-        from pachyderm_sdk.api import pfs
+        """创建数据集导出任务，动态创建管道进行处理"""
+        from .tasks import process_dataset_export
+        from core.redis import start_job_async_or_sync
         
         version = self.get_object()
-        export_format = request.data.get('format', 'YOLO')  # 默认使用YOLO，因为format-converter已经处理为YOLO格式
+        export_format = request.data.get('format', 'YOLO')
         
         logger.info(f"创建导出请求 - 项目: {project_pk}, 版本: {pk}, 格式: {export_format}")
         logger.info(f"版本状态: {version.status}")
-        logger.info(f"版本输出commit: {version.pachyderm_output_commit}")
         
-        # 检查版本是否已处理完成
-        if version.status != DatasetVersion.Status.COMPLETED:
-            logger.warning(f"版本 {pk} 状态不是COMPLETED，当前状态: {version.status}")
+        # 检查版本配置是否已创建
+        if version.status != DatasetVersion.Status.CREATED:
+            logger.warning(f"版本 {pk} 状态不是CREATED，当前状态: {version.status}")
             return Response({
-                'error': '数据集版本尚未处理完成',
-                'status': version.status
+                'error': '版本配置尚未创建完成',
+                'status': version.status,
+                'message': '请等待版本配置创建完成后再进行导出'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        if not version.pachyderm_output_commit:
-            logger.warning(f"版本 {pk} 没有有效的输出commit")
+        if not version.pachyderm_input_commit:
+            logger.warning(f"版本 {pk} 没有有效的配置commit")
             return Response({
-                'error': '版本没有有效的输出数据',
-                'message': '请确保版本处理已成功完成'
+                'error': '版本配置不完整',
+                'message': '版本配置文件不存在，无法进行导出'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # 检查是否已存在相同配置的导出
+        # 检查是否已存在相同配置的进行中或已完成的导出
         existing_export = DatasetExport.objects.filter(
             dataset_version=version,
-            format=export_format
+            format=export_format,
+            status__in=[DatasetExport.ExportStatus.PROCESSING, DatasetExport.ExportStatus.COMPLETED]
         ).first()
         
-        if existing_export and existing_export.status == DatasetExport.ExportStatus.COMPLETED:
-            return Response({
-                'id': existing_export.id,
-                'status': existing_export.status,
-                'download_url': existing_export.download_url,
-                'message': '已存在相同配置的导出'
-            })
+        if existing_export:
+            if existing_export.status == DatasetExport.ExportStatus.COMPLETED:
+                return Response({
+                    'id': existing_export.id,
+                    'status': existing_export.status,
+                    'download_url': existing_export.download_url,
+                    'message': '已存在相同配置的导出'
+                })
+            else:
+                return Response({
+                    'id': existing_export.id,
+                    'status': existing_export.status,
+                    'progress': existing_export.progress,
+                    'message': '相同配置的导出正在处理中'
+                })
         
         # 创建新的导出记录
         export_record = DatasetExport.objects.create(
@@ -1057,74 +1066,22 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
             include_augmented=True,
             created_by=request.user,
             status=DatasetExport.ExportStatus.PROCESSING,
+            progress=0.0,
             started_at=timezone.now()
         )
         
-        try:
-            # 直接使用已处理的format-converter输出
-            # 根据tasks.py中的命名规则，实际的format-converter仓库名称是：
-            format_converter_repo = f"format-converter-yolo-{version.project.id}-v{version.id}"
-            
-            client = get_pachyderm_client()
-            
-            # 检查format-converter输出是否存在
-            try:
-                format_master_branch = pfs.Branch(repo=pfs.Repo(name=format_converter_repo), name="master")
-                format_branch_info = client.pfs.inspect_branch(branch=format_master_branch)
-                format_output_commit = format_branch_info.head
-                
-                # 验证输出文件 - 使用正确的API调用方式
-                format_file_obj = pfs.File(commit=format_output_commit, path="/")
-                format_files = list(client.pfs.list_file(file=format_file_obj))
-                if not format_files:
-                    raise Exception(f"格式转换仓库 {format_converter_repo} 没有输出文件")
-                
-                logger.info(f"找到format-converter输出: {len(format_files)} 个文件")
-                
-            except Exception as e:
-                logger.error(f"无法访问format-converter输出: {e}")
-                # 降级到使用原始dataset输出
-                dataset_repo = f"ls-dataset-{version.project.id}-v{version.id}"
-                try:
-                    dataset_master_branch = pfs.Branch(repo=pfs.Repo(name=dataset_repo), name="master") 
-                    dataset_branch_info = client.pfs.inspect_branch(branch=dataset_master_branch)
-                    format_output_commit = dataset_branch_info.head
-                    format_converter_repo = dataset_repo
-                    logger.info(f"使用原始dataset输出: {dataset_repo}")
-                except Exception as e2:
-                    raise Exception(f"无法访问任何输出数据: format-converter错误: {e}, dataset错误: {e2}")
-            
-            # 生成下载链接
-            download_url = self._generate_download_url(format_converter_repo, format_output_commit)
-            
-            # 更新导出记录为完成状态
-            export_record.pachyderm_pipeline_name = format_converter_repo
-            export_record.pachyderm_output_commit = format_output_commit.id
-            export_record.download_url = download_url
-            export_record.status = DatasetExport.ExportStatus.COMPLETED
-            export_record.completed_at = timezone.now()
-            export_record.progress = 100.0
-            export_record.save()
-            
-            return Response({
-                'id': export_record.id,
-                'status': export_record.status,
-                'download_url': download_url,
-                'pipeline_name': format_converter_repo,
-                'message': '导出已准备就绪',
-                'format': export_format
-            }, status=status.HTTP_201_CREATED)
-            
-        except Exception as e:
-            logger.error(f"创建导出任务失败: {e}")
-            export_record.status = DatasetExport.ExportStatus.FAILED
-            export_record.error_message = str(e)
-            export_record.save()
-            
-            return Response({
-                'error': '创建导出任务失败',
-                'details': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        # 启动导出处理任务
+        start_job_async_or_sync(process_dataset_export, export_record.id, version.id)
+        
+        logger.info(f"导出任务已启动: export_id={export_record.id}, version_id={version.id}")
+        
+        return Response({
+            'id': export_record.id,
+            'status': export_record.status,
+            'progress': export_record.progress,
+            'message': '导出任务已启动，正在动态创建管道并处理数据',
+            'estimated_time': '预计3-5分钟完成'
+        })
 
     @action(detail=True, methods=['get'], url_path='export-status/(?P<export_id>[^/.]+)')
     def export_status(self, request, pk=None, project_pk=None, export_id=None):
@@ -1393,10 +1350,63 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
             response['Content-Disposition'] = f'attachment; filename="{zip_filename}"'
             response['Content-Length'] = len(zip_buffer.getvalue())
             
+            # 查找对应的导出记录，并触发管道清理
+            try:
+                export_record = DatasetExport.objects.filter(
+                    dataset_version=version,
+                    pachyderm_pipeline_name=pipeline_name,
+                    pachyderm_output_commit=commit_id,
+                    status=DatasetExport.ExportStatus.COMPLETED
+                ).first()
+                
+                if export_record:
+                    # 启动异步管道清理任务
+                    from .tasks import cleanup_export_pipelines
+                    from core.redis import start_job_async_or_sync
+                    
+                    # 启动管道清理任务（立即执行，不延迟）
+                    start_job_async_or_sync(cleanup_export_pipelines, export_record.id)
+                    logger.info(f"已启动管道清理任务: export_id={export_record.id}")
+                    
+            except Exception as cleanup_e:
+                logger.warning(f"启动管道清理失败: {cleanup_e}")
+                # 不影响下载，继续返回文件
+            
             return response
                 
         except Exception as e:
             logger.error(f"下载导出文件失败: {e}")
+            return Response({
+                'error': '下载失败',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='exports/(?P<export_id>[^/.]+)/download')
+    def download_export_by_id(self, request, pk=None, project_pk=None, export_id=None):
+        """通过export_id下载导出文件（重定向到实际下载链接）"""
+        try:
+            version = self.get_object()
+            export_record = DatasetExport.objects.get(id=export_id, dataset_version=version)
+            
+            if export_record.status != DatasetExport.ExportStatus.COMPLETED:
+                return Response({
+                    'error': '导出尚未完成',
+                    'status': export_record.status
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            if not export_record.download_url:
+                return Response({
+                    'error': '下载链接不可用'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # 重定向到实际的下载链接
+            from django.http import HttpResponseRedirect
+            return HttpResponseRedirect(export_record.download_url)
+            
+        except DatasetExport.DoesNotExist:
+            return Response({'error': '导出记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"通过export_id下载失败: {e}")
             return Response({
                 'error': '下载失败',
                 'details': str(e)

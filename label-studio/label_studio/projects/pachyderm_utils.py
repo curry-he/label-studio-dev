@@ -16,7 +16,7 @@ def get_pachyderm_client():
         client = pachyderm_sdk.Client(
             host='localhost',
             port=80,
-            auth_token='ec405fb5b9554e6d97e3d86b96724556',
+            auth_token='3bfd1a78e77641eabbae2df94faa5b3c',
             root_certs=None,
             transaction_id=None,
             tls=False
@@ -420,3 +420,61 @@ def get_processed_files_from_version(client: pachyderm_sdk.Client, version_commi
     except Exception as e:
         logger.error(f"Error getting processed files: {e}")
         return []
+
+
+def delete_pipeline(client: pachyderm_sdk.Client, pipeline_name: str, force: bool = True):
+    """删除指定的Pachyderm管道
+    
+    Args:
+        client: Pachyderm客户端
+        pipeline_name: 管道名称
+        force: 是否强制删除，即使有错误也删除
+    """
+    from pachyderm_sdk.api import pps
+    
+    try:
+        pipeline = pps.Pipeline(name=pipeline_name)
+        client.pps.delete_pipeline(pipeline=pipeline, force=force)
+        logger.info(f"成功删除管道: {pipeline_name}")
+        return True
+    except Exception as e:
+        logger.error(f"删除管道 {pipeline_name} 失败: {e}")
+        return False
+
+
+def pipeline_exists(client: pachyderm_sdk.Client, pipeline_name: str) -> bool:
+    """检查管道是否存在
+    
+    Args:
+        client: Pachyderm客户端  
+        pipeline_name: 管道名称
+        
+    Returns:
+        bool: 管道是否存在
+    """
+    from pachyderm_sdk.api import pps
+    
+    try:
+        pipeline = pps.Pipeline(name=pipeline_name)
+        client.pps.inspect_pipeline(pipeline=pipeline)
+        return True
+    except Exception:
+        return False
+
+
+def cleanup_pipeline_safely(client: pachyderm_sdk.Client, pipeline_name: str):
+    """安全地清理管道，包含存在性检查
+    
+    Args:
+        client: Pachyderm客户端
+        pipeline_name: 管道名称
+    """
+    if pipeline_exists(client, pipeline_name):
+        logger.info(f"管道 {pipeline_name} 存在，开始删除...")
+        success = delete_pipeline(client, pipeline_name, force=True)
+        if success:
+            logger.info(f"管道 {pipeline_name} 删除成功")
+        else:
+            logger.warning(f"管道 {pipeline_name} 删除失败")
+    else:
+        logger.info(f"管道 {pipeline_name} 不存在，无需删除")
