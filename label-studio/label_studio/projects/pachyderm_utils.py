@@ -304,28 +304,21 @@ def wait_for_pipeline_output(client: pachyderm_sdk.Client, output_repo_name: str
 
     while time.time() - start_time < timeout:
         try:
-            # 检查仓库的最新commit
-            repo_info = client.pfs.inspect_repo(repo=pfs.Repo(name=output_repo_name))
-            if repo_info.branches:
-                # 获取master分支的最新commit
-                master_commit = None
-                for branch in repo_info.branches:
-                    if branch.branch.name == "master":
-                        master_commit = branch.head
-                        break
-                
-                if master_commit:
-                    # 检查commit是否有文件
-                    try:
-                        # 使用正确的 File 对象调用 list_file
-                        file_obj = pfs.File(commit=master_commit, path="/")
-                        files = list(client.pfs.list_file(file=file_obj))
-                        if files:
-                            logger.info(f"管道输出完成! 仓库 {output_repo_name} 包含 {len(files)} 个文件/目录")
-                            logger.info(f"输出commit: {master_commit.id}")
-                            return master_commit
-                    except Exception as e:
-                        logger.debug(f"检查文件列表时出错: {e}")
+            # 使用辅助函数获取master分支的head commit
+            master_commit = get_master_commit_from_repo(client, output_repo_name)
+            
+            if master_commit:
+                # 检查commit是否有文件
+                try:
+                    # 使用正确的 File 对象调用 list_file
+                    file_obj = pfs.File(commit=master_commit, path="/")
+                    files = list(client.pfs.list_file(file=file_obj))
+                    if files:
+                        logger.info(f"管道输出完成! 仓库 {output_repo_name} 包含 {len(files)} 个文件/目录")
+                        logger.info(f"输出commit: {master_commit.id}")
+                        return master_commit
+                except Exception as e:
+                    logger.debug(f"检查文件列表时出错: {e}")
             
         except Exception as e:
             logger.debug(f"检查仓库 {output_repo_name} 时出错: {e}")
@@ -478,6 +471,53 @@ def cleanup_pipeline_safely(client: pachyderm_sdk.Client, pipeline_name: str):
             logger.warning(f"管道 {pipeline_name} 删除失败")
     else:
         logger.info(f"管道 {pipeline_name} 不存在，无需删除")
+
+
+def get_master_commit_from_repo(client: pachyderm_sdk.Client, repo_name: str):
+    """从仓库获取master分支的head commit
+    
+    这是一个正确的方法，因为:
+    1. inspect_repo 返回 Branch 对象列表，不包含 head 信息
+    2. list_branch 返回 BranchInfo 对象列表，包含 head commit 信息
+    
+    Args:
+        client: Pachyderm客户端
+        repo_name: 仓库名称
+        
+    Returns:
+        master分支的head commit，如果没有则返回None
+    """
+    try:
+        # 首先检查仓库是否存在且有分支
+        repo_info = client.pfs.inspect_repo(repo=pfs.Repo(name=repo_name))
+        if not repo_info.branches:
+            logger.warning(f"仓库 {repo_name} 没有分支")
+            return None
+            
+        # 检查是否有master分支
+        master_branch_exists = False
+        for branch in repo_info.branches:
+            if branch.name == "master":
+                master_branch_exists = True
+                break
+                
+        if not master_branch_exists:
+            logger.warning(f"仓库 {repo_name} 没有master分支")
+            return None
+        
+        # 使用 list_branch 获取 BranchInfo，其中包含 head commit
+        branch_infos = list(client.pfs.list_branch(repo=pfs.Repo(name=repo_name)))
+        for branch_info in branch_infos:
+            if branch_info.branch.name == "master":
+                logger.info(f"获取到仓库 {repo_name} master分支的head commit: {branch_info.head.id}")
+                return branch_info.head
+        
+        logger.warning(f"无法获取仓库 {repo_name} master分支的head commit")
+        return None
+        
+    except Exception as e:
+        logger.error(f"获取仓库 {repo_name} master分支commit失败: {e}")
+        return None
 
 
 def get_state_name(state):
@@ -670,16 +710,10 @@ def get_pipeline_output_commit(client: pachyderm_sdk.Client, pipeline_name: str)
         最新的输出commit，如果没有则返回None
     """
     try:
-        # 检查输出仓库是否存在
-        repo_info = client.pfs.inspect_repo(repo=pfs.Repo(name=pipeline_name))
-        
-        if repo_info.branches:
-            # 查找master分支
-            for branch in repo_info.branches:
-                if branch.branch.name == "master":
-                    master_commit = branch.head
-                    logger.info(f"获取到管道 {pipeline_name} 的输出commit: {master_commit.id}")
-                    return master_commit
+        # 使用辅助函数获取master分支的head commit
+        master_commit = get_master_commit_from_repo(client, pipeline_name)
+        if master_commit:
+            return master_commit
         
         logger.warning(f"管道 {pipeline_name} 没有找到master分支或输出")
         return None
@@ -687,3 +721,247 @@ def get_pipeline_output_commit(client: pachyderm_sdk.Client, pipeline_name: str)
     except Exception as e:
         logger.error(f"获取管道 {pipeline_name} 输出commit失败: {e}")
         return None
+
+
+def ensure_export_results_repo(client: pachyderm_sdk.Client):
+    """
+    确保导出结果持久化仓库存在，并且有master分支 (健壮版本)
+    
+    Args:
+        client: Pachyderm客户端
+        
+    Returns:
+        导出结果仓库名称
+    """
+    export_repo_name = "export-results"
+    
+    # 标志位，用于判断仓库是已存在还是新创建的
+    repo_existed_before_run = True
+
+    # 1. 尝试创建仓库，并优雅地处理“已存在”的错误，避免竞争条件
+    try:
+        client.pfs.create_repo(repo=pfs.Repo(name=export_repo_name, type="user"))
+        logger.info(f"成功创建导出结果仓库: {export_repo_name}")
+        repo_existed_before_run = False # 仓库是新创建的，肯定没有分支
+    except Exception as e:
+        # 捕获更具体的错误会更好，但字符串匹配是可行的后备方案
+        if "already exists" in str(e) or "has the same name" in str(e):
+            logger.info(f"导出结果仓库 {export_repo_name} 已存在，将检查master分支")
+            repo_existed_before_run = True
+        else:
+            logger.error(f"创建导出结果仓库 {export_repo_name} 时发生意外错误: {e}")
+            raise
+
+    # 2. 如果仓库之前已存在，则需要明确检查master分支是否存在
+    if repo_existed_before_run:
+        try:
+            repo_info = client.pfs.inspect_repo(repo=pfs.Repo(name=export_repo_name))
+            master_found = False
+            if repo_info.branches:
+                # 使用与项目中其他部分一致的健壮逻辑来检查分支
+                for branch_info in repo_info.branches:
+                    branch_name = None
+                    if hasattr(branch_info, 'name'):
+                        branch_name = branch_info.name
+                    elif hasattr(branch_info, 'branch') and hasattr(branch_info.branch, 'name'):
+                        branch_name = branch_info.branch.name
+                    
+                    if branch_name == "master":
+                        master_found = True
+                        break
+            
+            if master_found:
+                logger.info(f"仓库 {export_repo_name} 的master分支已存在，无需操作")
+                return export_repo_name # 分支存在，一切正常，直接返回
+            else:
+                # 仓库存在但没有master分支，标记为需要创建
+                repo_existed_before_run = False
+                
+        except Exception as e:
+            logger.error(f"检查仓库 {export_repo_name} 分支时出错: {e}")
+            raise
+
+    # 3. 如果仓库是新创建的，或者旧仓库没有master分支，则创建它
+    if not repo_existed_before_run:
+        logger.info(f"准备为仓库 {export_repo_name} 创建master分支及初始commit...")
+        try:
+            # 创建一个初始commit来建立master分支
+            with client.pfs.commit(branch=pfs.Branch.from_uri(f"{export_repo_name}@master")) as commit:
+                commit.put_file_from_bytes(
+                    path="/.gitkeep",
+                    data=b"# This file ensures the repository has a master branch\n"
+                )
+            logger.info(f"成功为仓库 {export_repo_name} 创建master分支")
+        except Exception as e:
+            logger.error(f"为仓库 {export_repo_name} 创建初始commit时失败: {e}")
+            raise
+    
+    return export_repo_name
+
+
+
+def copy_files_to_export_results(client: pachyderm_sdk.Client, source_commit: pfs.Commit, 
+                                export_key: str, export_format: str = "YOLO"):
+    """将导出结果复制到持久化仓库
+    
+    Args:
+        client: Pachyderm客户端
+        source_commit: 源commit（临时管道的输出）
+        export_key: 导出唯一标识 (project_id-version_id-format的组合)
+        export_format: 导出格式
+        
+    Returns:
+        持久化仓库中的commit ID
+    """
+    export_repo_name = "export-results"
+    
+    logger.info(f"开始复制导出结果到持久化仓库: {export_key}")
+    
+    # 获取源文件列表
+    def get_all_files_recursive(commit, path="/"):
+        """递归获取目录下的所有文件"""
+        all_files = []
+        try:
+            file_obj = pfs.File(commit=commit, path=path)
+            files = list(client.pfs.list_file(file=file_obj))
+            
+            for file_info in files:
+                if file_info.file_type == pfs.FileType.FILE:
+                    all_files.append(file_info)
+                elif file_info.file_type == pfs.FileType.DIR:
+                    subdir_files = get_all_files_recursive(commit, file_info.file.path)
+                    all_files.extend(subdir_files)
+                    
+        except Exception as e:
+            logger.warning(f"获取路径 {path} 下的文件时出错: {e}")
+            
+        return all_files
+    
+    # 开始复制到持久化仓库
+    with client.pfs.commit(branch=pfs.Branch.from_uri(f"{export_repo_name}@master")) as export_commit:
+        all_files = get_all_files_recursive(source_commit, "/")
+        logger.info(f"找到 {len(all_files)} 个文件需要复制")
+        
+        for file_info in all_files:
+            source_path = file_info.file.path
+            # 使用导出键作为目录前缀，避免不同导出之间的冲突
+            target_path = f"/{export_key}{source_path}"
+            
+            try:
+                # 读取源文件内容
+                source_file_obj = pfs.File(commit=source_commit, path=source_path)
+                file_content = client.pfs.get_file(file=source_file_obj)
+                
+                # 处理不同的返回类型
+                content_bytes = b''
+                if hasattr(file_content, 'read'):
+                    content_bytes = file_content.read()
+                else:
+                    for chunk in file_content:
+                        if hasattr(chunk, 'value'):
+                            content_bytes += chunk.value
+                        elif isinstance(chunk, bytes):
+                            content_bytes += chunk
+                        else:
+                            content_bytes += bytes(chunk)
+                
+                # 写入到目标仓库
+                export_commit.put_file_from_bytes(path=target_path, data=content_bytes)
+                logger.debug(f"复制文件: {source_path} -> {target_path}")
+                
+            except Exception as e:
+                logger.error(f"复制文件 {source_path} 失败: {e}")
+                continue
+        
+        # 添加元数据文件
+        metadata = {
+            "export_key": export_key,
+            "export_format": export_format,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source_commit": source_commit.id,
+            "file_count": len(all_files)
+        }
+        
+        metadata_path = f"/{export_key}/_metadata.json"
+        export_commit.put_file_from_bytes(
+            path=metadata_path,
+            data=json.dumps(metadata, indent=2, ensure_ascii=False).encode('utf-8')
+        )
+        
+        logger.info(f"导出结果复制完成: {export_key}, commit: {export_commit.id}")
+        return export_commit.id
+
+
+def check_export_exists_in_persistent_repo(client: pachyderm_sdk.Client, export_key: str):
+    """检查持久化仓库中是否已存在指定的导出结果，如果仓库不存在则自动创建
+    
+    Args:
+        client: Pachyderm客户端
+        export_key: 导出唯一标识
+        
+    Returns:
+        (exists: bool, commit_id: str or None)
+    """
+    export_repo_name = "export-results"
+    
+    try:
+        # 检查仓库是否存在
+        repo_info = client.pfs.inspect_repo(repo=pfs.Repo(name=export_repo_name))
+        
+        if not repo_info.branches:
+            logger.info(f"持久化仓库 {export_repo_name} 存在但没有分支")
+            return False, None
+            
+        # 获取master分支的最新commit
+        master_commit = get_master_commit_from_repo(client, export_repo_name)
+        if not master_commit:
+            logger.info(f"持久化仓库 {export_repo_name} 没有master分支")
+            return False, None
+        
+        # 检查是否存在指定的导出目录
+        try:
+            export_dir_path = f"/{export_key}"
+            file_obj = pfs.File(commit=master_commit, path=export_dir_path)
+            files = list(client.pfs.list_file(file=file_obj))
+            
+            if files:
+                logger.info(f"在持久化仓库中找到现有导出: {export_key}")
+                return True, master_commit.id
+            else:
+                return False, None
+                
+        except Exception:
+            # 目录不存在
+            return False, None
+            
+    except Exception as e:
+        # 检查是否是仓库不存在的错误
+        error_msg = str(e).lower()
+        if "not found" in error_msg and "repo" in error_msg:
+            logger.info(f"持久化仓库 {export_repo_name} 不存在，正在自动创建...")
+            try:
+                # 自动创建持久化仓库
+                ensure_export_results_repo(client)
+                logger.info(f"✅ 持久化仓库 {export_repo_name} 创建成功")
+                # 仓库刚创建，肯定没有现有导出
+                return False, None
+            except Exception as create_error:
+                logger.error(f"❌ 创建持久化仓库失败: {create_error}")
+                return False, None
+        else:
+            logger.warning(f"检查持久化导出时出错: {e}")
+            return False, None
+
+
+def generate_export_key(project_id: int, version_id: int, export_format: str) -> str:
+    """生成导出的唯一标识
+    
+    Args:
+        project_id: 项目ID
+        version_id: 版本ID  
+        export_format: 导出格式
+        
+    Returns:
+        导出唯一标识字符串
+    """
+    return f"project-{project_id}-version-{version_id}-{export_format.lower()}"

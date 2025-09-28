@@ -58,16 +58,24 @@ export const VersionExportModal = ({ visible, onHide, project, version }) => {
 
       // 检查响应是否存在且有效
       if (createResponse && !createResponse.error) {
-        const { id: exportId, status: exportStatus, download_url } = createResponse;
+        const { id: exportId, status: exportStatus, download_url, is_existing, message } = createResponse;
         
         if (exportStatus === 'completed' && download_url) {
           // 导出即时完成，直接下载
-          setDownloadingMessage("导出完成，正在下载...");
+          if (is_existing) {
+            setDownloadingMessage(message || "检测到现有导出，直接下载...");
+          } else {
+            setDownloadingMessage("导出完成，正在下载...");
+          }
           window.open(download_url, '_blank');
           onHide();
         } else if (exportStatus === 'processing') {
           // 如果仍在处理中（不太可能），开始轮询状态
-          setDownloadingMessage("正在准备导出文件...");
+          if (is_existing) {
+            setDownloadingMessage(message || "现有导出正在处理中，请等待...");
+          } else {
+            setDownloadingMessage("正在准备导出文件...");
+          }
           pollExportStatus(exportId);
         } else {
           // 其他状态的处理
@@ -127,11 +135,15 @@ export const VersionExportModal = ({ visible, onHide, project, version }) => {
         });
 
         if (statusResponse && !statusResponse.error) {
-          const { status: exportStatus, progress, download_url } = statusResponse;
+          const { status: exportStatus, progress, download_url, is_existing, message } = statusResponse;
 
           if (exportStatus === 'completed' && download_url) {
             // 导出完成，提供下载链接
-            setDownloadingMessage("导出完成，正在下载...");
+            if (is_existing) {
+              setDownloadingMessage(message || "检测到现有导出，直接下载...");
+            } else {
+              setDownloadingMessage("导出完成，正在下载...");
+            }
             window.open(download_url, '_blank');
             onHide();
             return;
@@ -140,7 +152,11 @@ export const VersionExportModal = ({ visible, onHide, project, version }) => {
             return;
           } else if (exportStatus === 'processing') {
             // 更新进度
-            setDownloadingMessage(`导出进度: ${progress || 0}%`);
+            if (is_existing) {
+              setDownloadingMessage(message || `现有导出进度: ${progress || 0}%`);
+            } else {
+              setDownloadingMessage(`导出进度: ${progress || 0}%`);
+            }
             
             attempts++;
             if (attempts < maxAttempts) {

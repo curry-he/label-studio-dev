@@ -1009,9 +1009,10 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='create-export')
     def create_export(self, request, pk=None, project_pk=None):
-        """创建数据集导出任务，动态创建管道进行处理"""
+        """创建数据集导出任务，支持持久化导出结果"""
         from .tasks import process_dataset_export
         from core.redis import start_job_async_or_sync
+        from . import pachyderm_utils as pachu
         
         version = self.get_object()
         export_format = request.data.get('format', 'YOLO')
@@ -1035,7 +1036,58 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
                 'message': '版本配置文件不存在，无法进行导出'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # 检查是否已存在相同配置的进行中或已完成的导出
+        # 生成导出唯一标识
+        export_key = pachu.generate_export_key(project_pk, pk, export_format)
+        
+        # 检查持久化仓库中是否已存在相同的导出结果
+        try:
+            client = pachu.get_pachyderm_client()
+            persistent_exists, persistent_commit_id = pachu.check_export_exists_in_persistent_repo(client, export_key)
+            
+            if persistent_exists:
+                logger.info(f"在持久化仓库中找到现有导出: {export_key}")
+                # 生成指向持久化仓库的下载链接
+                download_url = f"/api/projects/{project_pk}/dataset-versions/{pk}/download-persistent/{export_key}/"
+                
+                # 检查或创建数据库记录
+                existing_export = DatasetExport.objects.filter(
+                    dataset_version=version,
+                    format=export_format,
+                    status=DatasetExport.ExportStatus.COMPLETED
+                ).first()
+                
+                if not existing_export:
+                    # 创建数据库记录来追踪这个持久化的导出
+                    existing_export = DatasetExport.objects.create(
+                        dataset_version=version,
+                        format=export_format,
+                        include_original=True,
+                        include_augmented=True,
+                        created_by=request.user,
+                        status=DatasetExport.ExportStatus.COMPLETED,
+                        progress=100.0,
+                        download_url=download_url,
+                        started_at=timezone.now(),
+                        completed_at=timezone.now(),
+                        pachyderm_pipeline_name="export-results",  # 标记为持久化仓库
+                        pachyderm_output_commit=persistent_commit_id
+                    )
+                
+                return Response({
+                    'id': existing_export.id,
+                    'status': existing_export.status,
+                    'download_url': download_url,
+                    'file_size': existing_export.file_size,
+                    'completed_at': existing_export.completed_at,
+                    'progress': 100.0,
+                    'is_existing': True,
+                    'message': '检测到持久化的导出结果，直接下载即可'
+                })
+                
+        except Exception as e:
+            logger.warning(f"检查持久化导出失败: {e}，继续进行新导出")
+        
+        # 检查是否已存在相同配置的进行中或已完成的导出（数据库记录）
         existing_export = DatasetExport.objects.filter(
             dataset_version=version,
             format=export_format,
@@ -1048,14 +1100,19 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
                     'id': existing_export.id,
                     'status': existing_export.status,
                     'download_url': existing_export.download_url,
-                    'message': '已存在相同配置的导出'
+                    'file_size': existing_export.file_size,
+                    'completed_at': existing_export.completed_at,
+                    'progress': 100.0,
+                    'is_existing': True,
+                    'message': '已存在相同配置的导出，直接下载即可'
                 })
             else:
                 return Response({
                     'id': existing_export.id,
                     'status': existing_export.status,
                     'progress': existing_export.progress,
-                    'message': '相同配置的导出正在处理中'
+                    'is_existing': True,
+                    'message': '相同配置的导出正在处理中，请稍后...'
                 })
         
         # 创建新的导出记录
@@ -1070,10 +1127,10 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
             started_at=timezone.now()
         )
         
-        # 启动导出处理任务
-        start_job_async_or_sync(process_dataset_export, export_record.id, version.id)
+        # 启动导出处理任务，传递export_key用于持久化
+        start_job_async_or_sync(process_dataset_export, export_record.id, version.id, export_key)
         
-        logger.info(f"导出任务已启动: export_id={export_record.id}, version_id={version.id}")
+        logger.info(f"导出任务已启动: export_id={export_record.id}, version_id={version.id}, export_key={export_key}")
         
         return Response({
             'id': export_record.id,
@@ -1097,17 +1154,22 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
             'id': export_record.id,
             'status': export_record.status,
             'progress': export_record.progress,
-            'format': export_record.format
+            'format': export_record.format,
+            'is_existing': True,  # 通过状态查询接口访问的都是现有导出
         }
         
         if export_record.status == DatasetExport.ExportStatus.COMPLETED:
             response_data.update({
                 'download_url': export_record.download_url,
                 'file_size': export_record.file_size,
-                'completed_at': export_record.completed_at
+                'completed_at': export_record.completed_at,
+                'message': '现有导出已完成，可直接下载'
             })
+        elif export_record.status == DatasetExport.ExportStatus.PROCESSING:
+            response_data['message'] = '现有导出正在处理中，请等待完成'
         elif export_record.status == DatasetExport.ExportStatus.FAILED:
             response_data['error_message'] = export_record.error_message
+            response_data['message'] = '现有导出处理失败'
             
         return Response(response_data)
     
@@ -1409,6 +1471,118 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
             logger.error(f"通过export_id下载失败: {e}")
             return Response({
                 'error': '下载失败',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='download-persistent/(?P<export_key>[^/]+)')
+    def download_persistent_export(self, request, pk=None, project_pk=None, export_key=None):
+        """从持久化仓库下载导出文件"""
+        import io
+        import zipfile
+        from django.http import HttpResponse
+        from .pachyderm_utils import get_pachyderm_client
+        from pachyderm_sdk.api import pfs
+        
+        def get_all_files_recursive(client, commit, path="/"):
+            """递归获取目录下的所有文件"""
+            all_files = []
+            try:
+                file_obj = pfs.File(commit=commit, path=path)
+                files = list(client.pfs.list_file(file=file_obj))
+                
+                for file_info in files:
+                    if file_info.file_type == pfs.FileType.FILE:
+                        all_files.append(file_info)
+                    elif file_info.file_type == pfs.FileType.DIR:
+                        subdir_files = get_all_files_recursive(client, commit, file_info.file.path)
+                        all_files.extend(subdir_files)
+                        
+            except Exception as e:
+                logger.warning(f"获取路径 {path} 下的文件时出错: {e}")
+                
+            return all_files
+        
+        try:
+            version = self.get_object()
+            client = get_pachyderm_client()
+            
+            logger.info(f"开始从持久化仓库下载导出: {export_key}")
+            
+            # 连接持久化仓库
+            export_repo_name = "export-results"
+            
+            # 使用辅助函数获取master分支的head commit
+            from .pachyderm_utils import get_master_commit_from_repo
+            master_commit = get_master_commit_from_repo(client, export_repo_name)
+            
+            if not master_commit:
+                raise Exception("持久化仓库没有master分支")
+            
+            # 获取指定导出的所有文件
+            export_path = f"/{export_key}"
+            all_files = get_all_files_recursive(client, master_commit, export_path)
+            
+            if not all_files:
+                raise Exception(f"持久化仓库中未找到导出: {export_key}")
+            
+            logger.info(f"在持久化仓库中找到 {len(all_files)} 个文件")
+            
+            # 创建内存中的压缩包
+            zip_buffer = io.BytesIO()
+            zip_filename = f"{export_key}.zip"
+            
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_info in all_files:
+                    file_path = file_info.file.path
+                    logger.debug(f"处理文件: {file_path}")
+                    
+                    # 下载文件内容
+                    file_obj = pfs.File(commit=master_commit, path=file_path)
+                    file_content = client.pfs.get_file(file=file_obj)
+                    
+                    # 处理不同的返回类型
+                    content_bytes = b''
+                    if hasattr(file_content, 'read'):
+                        content_bytes = file_content.read()
+                    else:
+                        for chunk in file_content:
+                            if hasattr(chunk, 'value'):
+                                content_bytes += chunk.value
+                            elif isinstance(chunk, bytes):
+                                content_bytes += chunk
+                            else:
+                                content_bytes += bytes(chunk)
+                    
+                    # 计算在压缩包中的相对路径（去除export_key前缀）
+                    if file_path.startswith(f"/{export_key}/"):
+                        archive_path = file_path[len(f"/{export_key}/"):]
+                    else:
+                        archive_path = file_path.lstrip('/')
+                    
+                    # 跳过元数据文件
+                    if archive_path == "_metadata.json":
+                        continue
+                        
+                    zipf.writestr(archive_path, content_bytes)
+                    logger.debug(f"已添加到压缩包: {archive_path}")
+            
+            logger.info(f"持久化导出压缩包创建完成: {zip_filename}")
+            
+            # 返回压缩包
+            zip_buffer.seek(0)
+            response = HttpResponse(
+                zip_buffer.getvalue(),
+                content_type='application/zip'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{zip_filename}"'
+            response['Content-Length'] = len(zip_buffer.getvalue())
+            
+            return response
+                
+        except Exception as e:
+            logger.error(f"从持久化仓库下载失败: {e}")
+            return Response({
+                'error': '从持久化仓库下载失败',
                 'details': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

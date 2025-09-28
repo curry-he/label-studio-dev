@@ -105,10 +105,10 @@ def process_version_creation(version_id):
 
 
 @shared_task
-def process_dataset_export(export_id, version_id):
+def process_dataset_export(export_id, version_id, export_key=None):
     """
     处理数据集导出：动态创建管道、处理数据、生成下载链接
-    导出完成后清理创建的管道以节省资源
+    导出完成后将结果复制到持久化仓库并清理临时管道
     """
     from django.utils import timezone
     from .models import DatasetExport, DatasetVersion
@@ -226,12 +226,44 @@ def process_dataset_export(export_id, version_id):
             logger.error(f"验证格式转换输出失败: {e}")
             raise Exception(f"格式转换管道输出验证失败: {e}")
         
-        # 8. 生成下载链接（使用正确的URL格式）
-        download_url = f"/api/projects/{project_id}/dataset-versions/{version_id}/download-export/{format_converter_repo}/{format_output_commit.id}/"
+        # 8. 复制结果到持久化仓库（如果提供了export_key）
+        persistent_commit_id = None
+        if export_key:
+            try:
+                logger.info(f"🗄️ 开始复制导出结果到持久化仓库: {export_key}")
+                # 复制文件到持久化仓库（仓库已在检查阶段确保存在）
+                logger.info(f"📂 开始复制文件到持久化仓库...")
+                persistent_commit_id = pachu.copy_files_to_export_results(
+                    client, format_output_commit, export_key, export_record.format
+                )
+                logger.info(f"✅ 导出结果已复制到持久化仓库，commit: {persistent_commit_id}")
+            except Exception as e:
+                logger.error(f"❌ 复制到持久化仓库失败: {e}")
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                # 将 persistent_commit_id 明确设置为 None
+                persistent_commit_id = None
         
-        # 9. 更新导出记录
-        export_record.pachyderm_pipeline_name = format_converter_repo
-        export_record.pachyderm_output_commit = format_output_commit.id
+        # 9. 生成下载链接
+        if persistent_commit_id and export_key:
+            # 优先使用持久化仓库的下载链接
+            download_url = f"/api/projects/{project_id}/dataset-versions/{version_id}/download-persistent/{export_key}/"
+            logger.info(f"🔗 使用持久化仓库下载链接: {download_url}")
+        else:
+            # 降级到临时管道下载链接
+            download_url = f"/api/projects/{project_id}/dataset-versions/{version_id}/download-export/{format_converter_repo}/{format_output_commit.id}/"
+            logger.info(f"🔗 使用临时管道下载链接: {download_url}")
+        
+        # 10. 更新导出记录
+        if persistent_commit_id and export_key:
+            # 使用持久化仓库信息
+            export_record.pachyderm_pipeline_name = "export-results"
+            export_record.pachyderm_output_commit = persistent_commit_id
+        else:
+            # 使用临时管道信息
+            export_record.pachyderm_pipeline_name = format_converter_repo
+            export_record.pachyderm_output_commit = format_output_commit.id
+            
         export_record.download_url = download_url
         export_record.status = DatasetExport.ExportStatus.COMPLETED
         export_record.completed_at = timezone.now()
@@ -241,14 +273,32 @@ def process_dataset_export(export_id, version_id):
         logger.info(f"🎉 导出任务完成!")
         logger.info(f"  - 导出格式: {export_record.format}")
         logger.info(f"  - 下载链接: {download_url}")
-        logger.info(f"  - 输出仓库: {format_converter_repo}")
-        logger.info(f"  - 输出提交: {format_output_commit.id}")
+        if persistent_commit_id:
+            logger.info(f"  - 持久化仓库: export-results")
+            logger.info(f"  - 持久化提交: {persistent_commit_id}")
+        logger.info(f"  - 临时管道: {format_converter_repo}")
+        logger.info(f"  - 临时提交: {format_output_commit.id}")
         logger.info(f"  - 数据处理时间: 事件驱动，精确响应")
         logger.info(f"  - 格式转换时间: 事件驱动，精确响应")
         
-        # 10. 清理管道（可选，如果需要立即清理）
-        # 注意：这里可以选择是否立即清理管道，或者在下载完成后清理
-        logger.info("💡 管道清理将在下载完成后进行")
+        # 11. 清理临时管道（始终进行，确保资源不浪费）
+        logger.info("🧹 准备清理临时管道...")
+        try:
+            # 无论是否使用持久化存储，都应该清理临时管道
+            # 延迟清理，确保第一次下载有机会完成
+            from core.redis import start_job_async_or_sync
+            
+            # 如果使用了持久化存储，立即清理临时管道
+            if persistent_commit_id:
+                logger.info("✅ 使用持久化存储，立即启动临时管道清理")
+                start_job_async_or_sync(cleanup_export_pipelines, export_record.id)
+            else:
+                logger.info("⏰ 使用临时存储，延迟清理将在下载后进行")
+                # 临时管道清理将在下载完成后触发
+                
+        except Exception as cleanup_error:
+            logger.warning(f"启动管道清理任务失败: {cleanup_error}")
+            # 不影响导出成功状态
         
     except Exception as e:
         logger.error(f"导出任务失败: {e}", exc_info=True)
@@ -274,7 +324,7 @@ def cleanup_pipelines(client, pipeline_names):
 @shared_task
 def cleanup_export_pipelines(export_id):
     """
-    导出下载完成后清理相关管道
+    导出下载完成后清理相关管道，但保留持久化仓库
     """
     import time
     
@@ -291,18 +341,37 @@ def cleanup_export_pipelines(export_id):
         if not export_record.pachyderm_pipeline_name:
             logger.info(f"导出 {export_id} 没有关联的管道，无需清理")
             return
-            
+        
         client = pachu.get_pachyderm_client()
-        pipeline_name = export_record.pachyderm_pipeline_name
         
-        # 推断数据处理管道名称（格式转换管道的前级）
-        if pipeline_name.startswith("format-converter-yolo-"):
-            dataset_pipeline_name = pipeline_name.replace("format-converter-yolo-", "ls-dataset-")
-            cleanup_pipelines(client, [dataset_pipeline_name, pipeline_name])
+        # 如果是持久化仓库，需要清理对应的临时管道
+        if export_record.pachyderm_pipeline_name == "export-results":
+            logger.info(f"导出 {export_id} 使用持久化仓库，清理对应的临时管道")
+            
+            # 根据导出记录重新构建临时管道名称
+            version = export_record.dataset_version
+            project_id = version.project.id
+            version_id = version.id
+            
+            # 构建临时管道名称（与process_dataset_export中的命名保持一致）
+            ls_dataset_repo = f"ls-dataset-{project_id}-v{version_id}"
+            format_converter_repo = f"format-converter-yolo-{project_id}-v{version_id}"
+            
+            logger.info(f"清理临时管道: {ls_dataset_repo}, {format_converter_repo}")
+            cleanup_pipelines(client, [ls_dataset_repo, format_converter_repo])
+            
         else:
-            cleanup_pipelines(client, [pipeline_name])
+            # 常规清理逻辑（非持久化仓库）
+            pipeline_name = export_record.pachyderm_pipeline_name
+            
+            # 推断数据处理管道名称（格式转换管道的前级）
+            if pipeline_name.startswith("format-converter-yolo-"):
+                dataset_pipeline_name = pipeline_name.replace("format-converter-yolo-", "ls-dataset-")
+                cleanup_pipelines(client, [dataset_pipeline_name, pipeline_name])
+            else:
+                cleanup_pipelines(client, [pipeline_name])
         
-        logger.info(f"✅ 导出 {export_id} 的管道清理完成")
+        logger.info(f"✅ 导出 {export_id} 的临时管道清理完成")
         
     except Exception as e:
         logger.error(f"清理导出 {export_id} 的管道失败: {e}", exc_info=True)

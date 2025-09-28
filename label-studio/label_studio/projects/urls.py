@@ -69,6 +69,7 @@ _api_urlpatterns += [
     path('<int:project_pk>/dataset-versions/<int:pk>/processed-files/', DatasetVersionViewSet.as_view({'get': 'get_processed_files'}), name='datasetversion-processed-files'),
     path('<int:project_pk>/dataset-versions/<int:pk>/retry-processing/', DatasetVersionViewSet.as_view({'post': 'retry_processing'}), name='datasetversion-retry-processing'),
     path('<int:project_pk>/dataset-versions/<int:pk>/download-export/<str:pipeline_name>/<str:commit_id>/', DatasetVersionViewSet.as_view({'get': 'download_export'}), name='datasetversion-download-export'),
+    path('<int:project_pk>/dataset-versions/<int:pk>/download-persistent/<str:export_key>/', DatasetVersionViewSet.as_view({'get': 'download_persistent_export'}), name='datasetversion-download-persistent'),
     path('<int:project_pk>/dataset-versions/<int:pk>/exports/<str:export_id>/download/', DatasetVersionViewSet.as_view({'get': 'download_export_by_id'}), name='datasetversion-download-export-by-id'),
     path('<int:project_pk>/dataset-versions/available-transforms/', DatasetVersionViewSet.as_view({'get': 'available_transforms'}), name='datasetversion-available-transforms'),
 ]
