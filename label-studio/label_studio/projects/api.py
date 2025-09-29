@@ -1042,10 +1042,10 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
         # 检查持久化仓库中是否已存在相同的导出结果
         try:
             client = pachu.get_pachyderm_client()
-            persistent_exists, persistent_commit_id = pachu.check_export_exists_in_persistent_repo(client, export_key)
+            persistent_exists, persistent_commit_id, file_count = pachu.check_export_exists_in_persistent_repo(client, export_key)
             
-            if persistent_exists:
-                logger.info(f"在持久化仓库中找到现有导出: {export_key}")
+            if persistent_exists and file_count > 0:
+                logger.info(f"在持久化仓库中找到现有导出: {export_key}，文件数: {file_count}")
                 # 生成指向持久化仓库的下载链接
                 download_url = f"/api/projects/{project_pk}/dataset-versions/{pk}/download-persistent/{export_key}/"
                 
@@ -1081,8 +1081,19 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
                     'completed_at': existing_export.completed_at,
                     'progress': 100.0,
                     'is_existing': True,
-                    'message': '检测到持久化的导出结果，直接下载即可'
+                    'file_count': file_count,
+                    'message': f'检测到持久化的导出结果（{file_count}个文件），直接下载即可'
                 })
+            elif persistent_exists and file_count == 0:
+                # 文件存在但损坏或为空
+                logger.warning(f"持久化仓库中的导出 {export_key} 存在但文件损坏或为空")
+                # 删除损坏的数据库记录（如果存在）
+                DatasetExport.objects.filter(
+                    dataset_version=version,
+                    format=export_format,
+                    pachyderm_pipeline_name="export-results"
+                ).delete()
+                # 继续创建新的导出
                 
         except Exception as e:
             logger.warning(f"检查持久化导出失败: {e}，继续进行新导出")
@@ -1523,7 +1534,43 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
             all_files = get_all_files_recursive(client, master_commit, export_path)
             
             if not all_files:
-                raise Exception(f"持久化仓库中未找到导出: {export_key}")
+                # 文件不存在，返回友好的HTML错误页面
+                error_html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>导出文件不存在</title>
+                    <meta charset="utf-8">
+                    <style>
+                        body {{ font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }}
+                        .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }}
+                        .error {{ color: #d32f2f; font-size: 24px; margin-bottom: 20px; }}
+                        .message {{ color: #333; line-height: 1.6; margin-bottom: 20px; }}
+                        .suggestion {{ background: #e3f2fd; padding: 15px; border-radius: 4px; border-left: 4px solid #2196f3; }}
+                        .button {{ background: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 15px; }}
+                        .button:hover {{ background: #1976d2; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <div class="error">⚠️ 导出文件不存在</div>
+                        <div class="message">
+                            很抱歉，您要下载的导出文件在持久化存储中不存在或已被清理。<br>
+                            导出键：<code>{export_key}</code>
+                        </div>
+                        <div class="suggestion">
+                            <strong>解决方案：</strong><br>
+                            1. 返回数据集版本页面，重新创建并导出该版本<br>
+                            2. 新的导出完成后，文件将重新保存到持久化存储中<br>
+                            3. 如果问题持续，请联系系统管理员
+                        </div>
+                        <a href="javascript:history.back()" class="button">返回上一页</a>
+                        <a href="javascript:window.close()" class="button">关闭窗口</a>
+                    </div>
+                </body>
+                </html>
+                """
+                return HttpResponse(error_html, content_type='text/html', status=404)
             
             logger.info(f"在持久化仓库中找到 {len(all_files)} 个文件")
             
@@ -1581,10 +1628,56 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
                 
         except Exception as e:
             logger.error(f"从持久化仓库下载失败: {e}")
-            return Response({
-                'error': '从持久化仓库下载失败',
-                'details': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            # 返回友好的HTML错误页面而不是JSON
+            error_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>下载失败</title>
+                <meta charset="utf-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }}
+                    .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }}
+                    .error {{ color: #d32f2f; font-size: 24px; margin-bottom: 20px; }}
+                    .message {{ color: #333; line-height: 1.6; margin-bottom: 20px; }}
+                    .details {{ background: #fff3e0; padding: 15px; border-radius: 4px; border-left: 4px solid #ff9800; margin-bottom: 20px; }}
+                    .suggestion {{ background: #e3f2fd; padding: 15px; border-radius: 4px; border-left: 4px solid #2196f3; }}
+                    .button {{ background: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 15px; }}
+                    .button:hover {{ background: #1976d2; }}
+                    code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-family: monospace; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="error">❌ 导出下载失败</div>
+                    <div class="message">
+                        在尝试下载导出文件时发生了错误。这可能是由于以下原因：
+                        <ul>
+                            <li>导出文件已被清理或不存在</li>
+                            <li>持久化存储连接异常</li>
+                            <li>文件损坏或不完整</li>
+                        </ul>
+                    </div>
+                    <div class="details">
+                        <strong>技术细节：</strong><br>
+                        导出键：<code>{export_key}</code><br>
+                        错误信息：<code>{str(e)}</code>
+                    </div>
+                    <div class="suggestion">
+                        <strong>建议解决方案：</strong><br>
+                        1. 返回数据集版本管理页面<br>
+                        2. 重新创建并导出该版本的数据<br>
+                        3. 等待新导出完成后再次下载<br>
+                        4. 如果问题持续存在，请联系技术支持
+                    </div>
+                    <a href="javascript:history.back()" class="button">返回上一页</a>
+                    <a href="javascript:window.close()" class="button">关闭窗口</a>
+                </div>
+            </body>
+            </html>
+            """
+            return HttpResponse(error_html, content_type='text/html', status=500)
 
 
 def split_tasks_for_version(version, split_config):

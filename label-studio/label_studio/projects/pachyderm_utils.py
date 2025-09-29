@@ -16,7 +16,7 @@ def get_pachyderm_client():
         client = pachyderm_sdk.Client(
             host='localhost',
             port=80,
-            auth_token='3bfd1a78e77641eabbae2df94faa5b3c',
+            auth_token='f6878d3748ae475ab57dc0b357104bb0',
             root_certs=None,
             transaction_id=None,
             tls=False
@@ -893,14 +893,14 @@ def copy_files_to_export_results(client: pachyderm_sdk.Client, source_commit: pf
 
 
 def check_export_exists_in_persistent_repo(client: pachyderm_sdk.Client, export_key: str):
-    """检查持久化仓库中是否已存在指定的导出结果，如果仓库不存在则自动创建
+    """检查持久化仓库中是否已存在指定的导出结果，并验证文件内容完整性
     
     Args:
         client: Pachyderm客户端
         export_key: 导出唯一标识
         
     Returns:
-        (exists: bool, commit_id: str or None)
+        (exists: bool, commit_id: str or None, file_count: int)
     """
     export_repo_name = "export-results"
     
@@ -910,29 +910,91 @@ def check_export_exists_in_persistent_repo(client: pachyderm_sdk.Client, export_
         
         if not repo_info.branches:
             logger.info(f"持久化仓库 {export_repo_name} 存在但没有分支")
-            return False, None
+            return False, None, 0
             
         # 获取master分支的最新commit
         master_commit = get_master_commit_from_repo(client, export_repo_name)
         if not master_commit:
             logger.info(f"持久化仓库 {export_repo_name} 没有master分支")
-            return False, None
+            return False, None, 0
         
-        # 检查是否存在指定的导出目录
+        # 检查是否存在指定的导出目录并验证文件完整性
         try:
             export_dir_path = f"/{export_key}"
             file_obj = pfs.File(commit=master_commit, path=export_dir_path)
             files = list(client.pfs.list_file(file=file_obj))
             
-            if files:
-                logger.info(f"在持久化仓库中找到现有导出: {export_key}")
-                return True, master_commit.id
+            if not files:
+                logger.info(f"持久化仓库中导出目录 {export_key} 为空")
+                return False, None, 0
+            
+            # 验证文件完整性：递归获取所有文件并验证内容
+            valid_files = []
+            invalid_files = []
+            
+            def verify_files_recursive(commit, path="/"):
+                try:
+                    file_obj = pfs.File(commit=commit, path=path)
+                    file_list = list(client.pfs.list_file(file=file_obj))
+                    
+                    for file_info in file_list:
+                        if file_info.file_type == pfs.FileType.FILE:
+                            # 验证文件内容是否可读取
+                            try:
+                                file_content = client.pfs.get_file(file=pfs.File(commit=commit, path=file_info.file.path))
+                                # 尝试读取少量内容验证文件完整性
+                                content_bytes = b''
+                                chunk_count = 0
+                                for chunk in file_content:
+                                    if chunk_count > 0:  # 只读取第一个chunk验证
+                                        break
+                                    if hasattr(chunk, 'value'):
+                                        content_bytes += chunk.value
+                                    elif isinstance(chunk, bytes):
+                                        content_bytes += chunk
+                                    else:
+                                        content_bytes += bytes(chunk)
+                                    chunk_count += 1
+                                
+                                if content_bytes or file_info.size_bytes == 0:  # 允许空文件
+                                    valid_files.append(file_info.file.path)
+                                else:
+                                    invalid_files.append(file_info.file.path)
+                                    logger.warning(f"文件 {file_info.file.path} 内容为空或无法读取")
+                                    
+                            except Exception as e:
+                                invalid_files.append(file_info.file.path)
+                                logger.warning(f"验证文件 {file_info.file.path} 时出错: {e}")
+                                
+                        elif file_info.file_type == pfs.FileType.DIR:
+                            # 递归验证子目录
+                            verify_files_recursive(commit, file_info.file.path)
+                            
+                except Exception as e:
+                    logger.warning(f"验证路径 {path} 时出错: {e}")
+            
+            verify_files_recursive(master_commit, export_dir_path)
+            
+            total_files = len(valid_files) + len(invalid_files)
+            
+            if invalid_files:
+                logger.warning(f"导出 {export_key} 中发现 {len(invalid_files)} 个无效文件: {invalid_files}")
+            
+            if len(valid_files) == 0:
+                logger.warning(f"导出 {export_key} 中没有有效文件")
+                return False, None, 0
+            elif len(invalid_files) > 0:
+                logger.warning(f"导出 {export_key} 存在但有部分文件损坏，有效文件: {len(valid_files)}, 无效文件: {len(invalid_files)}")
+                # 仍然返回true，但调用者可以根据file_count判断是否完整
+                return True, master_commit.id, len(valid_files)
             else:
-                return False, None
+                logger.info(f"在持久化仓库中找到完整的导出: {export_key}，文件数: {len(valid_files)}")
+                return True, master_commit.id, len(valid_files)
                 
-        except Exception:
-            # 目录不存在
-            return False, None
+        except Exception as e:
+            # 目录不存在或其他错误
+            logger.info(f"检查导出目录 {export_key} 时出错: {e}")
+            return False, None, 0
             
     except Exception as e:
         # 检查是否是仓库不存在的错误
@@ -944,13 +1006,13 @@ def check_export_exists_in_persistent_repo(client: pachyderm_sdk.Client, export_
                 ensure_export_results_repo(client)
                 logger.info(f"✅ 持久化仓库 {export_repo_name} 创建成功")
                 # 仓库刚创建，肯定没有现有导出
-                return False, None
+                return False, None, 0
             except Exception as create_error:
                 logger.error(f"❌ 创建持久化仓库失败: {create_error}")
-                return False, None
+                return False, None, 0
         else:
             logger.warning(f"检查持久化导出时出错: {e}")
-            return False, None
+            return False, None, 0
 
 
 def generate_export_key(project_id: int, version_id: int, export_format: str) -> str:

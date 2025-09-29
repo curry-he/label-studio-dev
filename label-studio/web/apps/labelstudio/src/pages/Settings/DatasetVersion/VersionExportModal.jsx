@@ -61,14 +61,34 @@ export const VersionExportModal = ({ visible, onHide, project, version }) => {
         const { id: exportId, status: exportStatus, download_url, is_existing, message } = createResponse;
         
         if (exportStatus === 'completed' && download_url) {
-          // 导出即时完成，直接下载
-          if (is_existing) {
-            setDownloadingMessage(message || "检测到现有导出，直接下载...");
+          // 在跳转前，如果是持久化导出，显示额外提示
+          if (is_existing && message) {
+            // 检查是否包含文件数量信息
+            const fileCountMatch = message.match(/(\d+)个文件/);
+            if (fileCountMatch) {
+              const fileCount = parseInt(fileCountMatch[1]);
+              if (fileCount === 0) {
+                setDownloadingMessage("检测到导出文件可能已损坏，正在重新创建导出...");
+                // 不跳转，让系统重新创建导出
+                return;
+              } else {
+                setDownloadingMessage(`检测到现有导出（${fileCount}个文件），正在下载...`);
+              }
+            } else {
+              setDownloadingMessage(message);
+            }
           } else {
             setDownloadingMessage("导出完成，正在下载...");
           }
-          window.open(download_url, '_blank');
-          onHide();
+          
+          // 使用更安全的下载方式
+          try {
+            window.open(download_url, '_blank');
+            onHide();
+          } catch (error) {
+            console.error('下载跳转失败:', error);
+            setDownloadingMessage("下载链接打开失败，请检查浏览器设置或手动复制链接");
+          }
         } else if (exportStatus === 'processing') {
           // 如果仍在处理中（不太可能），开始轮询状态
           if (is_existing) {
@@ -139,13 +159,33 @@ export const VersionExportModal = ({ visible, onHide, project, version }) => {
 
           if (exportStatus === 'completed' && download_url) {
             // 导出完成，提供下载链接
-            if (is_existing) {
-              setDownloadingMessage(message || "检测到现有导出，直接下载...");
+            if (is_existing && message) {
+              // 检查是否包含文件数量信息
+              const fileCountMatch = message.match(/(\d+)个文件/);
+              if (fileCountMatch) {
+                const fileCount = parseInt(fileCountMatch[1]);
+                if (fileCount === 0) {
+                  setDownloadingMessage("检测到导出文件已损坏，正在重新创建导出...");
+                  // 不跳转，让系统重新创建导出
+                  return;
+                } else {
+                  setDownloadingMessage(`现有导出已完成（${fileCount}个文件），正在下载...`);
+                }
+              } else {
+                setDownloadingMessage(message);
+              }
             } else {
               setDownloadingMessage("导出完成，正在下载...");
             }
-            window.open(download_url, '_blank');
-            onHide();
+            
+            // 使用更安全的下载方式
+            try {
+              window.open(download_url, '_blank');
+              onHide();
+            } catch (error) {
+              console.error('下载跳转失败:', error);
+              setDownloadingMessage("下载链接打开失败，请检查浏览器设置");
+            }
             return;
           } else if (exportStatus === 'failed') {
             api.handleError({ message: statusResponse.error_message || '导出失败' });
