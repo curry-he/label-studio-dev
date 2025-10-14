@@ -291,7 +291,7 @@ def process_dataset_export(export_id, version_id, export_key=None):
             # 如果使用了持久化存储，立即清理临时管道
             if persistent_commit_id:
                 logger.info("✅ 使用持久化存储，立即启动临时管道清理")
-                start_job_async_or_sync(cleanup_export_pipelines, export_record.id)
+                # start_job_async_or_sync(cleanup_export_pipelines, export_record.id)
             else:
                 logger.info("⏰ 使用临时存储，延迟清理将在下载后进行")
                 # 临时管道清理将在下载完成后触发
@@ -312,7 +312,7 @@ def process_dataset_export(export_id, version_id, export_key=None):
         # 清理已创建的管道
         if created_pipelines and client:
             logger.info("🧹 清理已创建的管道...")
-            cleanup_pipelines(client, created_pipelines)
+            # cleanup_pipelines(client, created_pipelines)
 
 
 def cleanup_pipelines(client, pipeline_names):

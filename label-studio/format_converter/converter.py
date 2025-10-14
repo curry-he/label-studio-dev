@@ -67,6 +67,10 @@ def get_labels_from_tasks(tasks: List[Dict[str, Any]]) -> Tuple[List[str], Dict[
             if result.get('type') == 'rectanglelabels':
                 labels = result.get('value', {}).get('rectanglelabels', [])
                 label_set.update(labels)
+            # 关键点标签不应被视为独立的类别，因此注释掉
+            # elif result.get('type') == 'keypointlabels':
+            #     labels = result.get('value', {}).get('keypointlabels', [])
+            #     label_set.update(labels)
     
     sorted_labels = sorted(list(label_set))
     label_to_id = {label: i for i, label in enumerate(sorted_labels)}
@@ -92,14 +96,28 @@ def convert_ls_to_yolo_bbox(value: Dict[str, float]) -> Tuple[float, float, floa
     return x_center, y_center, width, height
 
 
-def process_split_directory(split_name: str, split_dir: str, output_base_dir: str, 
+def convert_ls_to_yolo_keypoint(value: Dict[str, float]) -> Tuple[float, float]:
+    """
+    将 Label Studio 的 keypoint value 转换为 YOLO 格式的归一化坐标。
+    LS value: {'x': %, 'y': %, 'width': %} (width表示关键点的尺寸)
+    YOLO keypoint format: [x, y] (0-1 normalized)
+    """
+    x, y = value['x'], value['y']
+    
+    # LS 坐标是百分比，直接除以100即可完成归一化
+    x_norm = x / 100.0
+    y_norm = y / 100.0
+    
+    return x_norm, y_norm
+
+
+def process_split_directory(split_name: str, split_dir: str, output_base_dir: str,
                           sorted_labels: List[str], label_to_id: Dict[str, int]):
     """
     处理单个数据集分割目录
     """
     logger.info(f"处理 {split_name} 分割...")
     
-    # 创建分割专用的输出目录结构
     split_output_dir = os.path.join(output_base_dir, split_name)
     split_images_dir = os.path.join(split_output_dir, 'images')
     split_labels_dir = os.path.join(split_output_dir, 'labels')
@@ -107,19 +125,17 @@ def process_split_directory(split_name: str, split_dir: str, output_base_dir: st
     os.makedirs(split_images_dir, exist_ok=True)
     os.makedirs(split_labels_dir, exist_ok=True)
     
-    # 为每个分割创建独立的 classes.txt
     classes_path = os.path.join(split_output_dir, 'classes.txt')
     with open(classes_path, 'w', encoding='utf-8') as f:
-        f.write('\\n'.join(sorted_labels))
+        f.write('\n'.join(sorted_labels))
     logger.info(f"创建 {split_name}/classes.txt")
     
-    # 加载分割目录中的所有任务数据
     all_tasks = []
     json_files = [f for f in os.listdir(split_dir) if f.lower().endswith('.json') and not f.startswith('processing_report')]
     
     if not json_files:
         logger.info(f"{split_name} 分割目录为空，创建空的结构")
-        return 0, 0  # 返回处理统计
+        return 0, 0
     
     for filename in json_files:
         filepath = os.path.join(split_dir, filename)
@@ -131,7 +147,6 @@ def process_split_directory(split_name: str, split_dir: str, output_base_dir: st
     
     logger.info(f"{split_name} 分割: 加载了 {len(all_tasks)} 个标注任务")
     
-    # 处理每个任务
     labels_generated_count = 0
     images_copied_count = 0
     
@@ -144,7 +159,6 @@ def process_split_directory(split_name: str, split_dir: str, output_base_dir: st
         image_filename = os.path.basename(image_s3_path)
         base_filename = os.path.splitext(image_filename)[0]
         
-        # 复制图片文件
         source_image_path = os.path.join(split_dir, image_filename)
         if os.path.exists(source_image_path):
             target_image_path = os.path.join(split_images_dir, image_filename)
@@ -153,25 +167,52 @@ def process_split_directory(split_name: str, split_dir: str, output_base_dir: st
         else:
             logger.warning(f"图片 {image_filename} 在 {split_name} 目录中未找到")
 
-        # 生成标签文件
         label_filepath = os.path.join(split_labels_dir, f"{base_filename}.txt")
         yolo_lines = []
         
         annotations = task.get('annotations') or task.get('completions', [])
         if annotations:
             latest_annotation = annotations[-1]
-            for result in latest_annotation.get('result', []):
-                # 检查是否是矩形框标注，并且有原始尺寸信息
-                if result.get('type') == 'rectanglelabels' and 'original_width' in result:
-                    label_name = result['value']['rectanglelabels'][0]
-                    class_id = label_to_id.get(label_name, 0)
+            results = latest_annotation.get('result', [])
+            
+            # --- 新逻辑：基于parentID关联bbox和keypoints ---
+            
+            # 1. 提取所有bboxes，用它们的ID作为索引
+            bboxes = {}
+            for r in results:
+                if r.get('type') == 'rectanglelabels' and 'id' in r:
+                    label_name = r['value']['rectanglelabels'][0]
+                    class_id = label_to_id.get(label_name)
+                    if class_id is None: continue
                     
-                    x_c, y_c, w, h = convert_ls_to_yolo_bbox(result['value'])
-                    yolo_lines.append(f"{class_id} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}")
+                    x_c, y_c, w, h = convert_ls_to_yolo_bbox(r['value'])
+                    bboxes[r['id']] = {
+                        'class_id': class_id,
+                        'bbox': [x_c, y_c, w, h],
+                        'keypoints': []
+                    }
+
+            # 2. 提取所有keypoints，并根据parentID关联到bboxes
+            for r in results:
+                if r.get('type') == 'keypointlabels' and 'parentID' in r:
+                    parent_id = r.get('parentID')
+                    if parent_id in bboxes:
+                        x_kp, y_kp = convert_ls_to_yolo_keypoint(r['value'])
+                        # YOLO格式要求keypoint后面跟一个可见性标志
+                        bboxes[parent_id]['keypoints'].extend([x_kp, y_kp, 2])
+
+            # 3. 生成YOLO格式的行
+            for bbox_id, data in bboxes.items():
+                bbox_str = " ".join(f"{coord:.6f}" for coord in data['bbox'])
+                kpts_str = " ".join(f"{coord:.6f}" for coord in data['keypoints'])
+                
+                line = f"{data['class_id']} {bbox_str}"
+                if kpts_str:
+                    line += f" {kpts_str}"
+                yolo_lines.append(line)
         
-        # 写入.txt文件，即使没有标注也要创建一个空文件
         with open(label_filepath, 'w', encoding='utf-8') as f:
-            f.write('\\n'.join(yolo_lines))
+            f.write('\n'.join(yolo_lines))
         
         if yolo_lines:
             labels_generated_count += 1
@@ -253,14 +294,43 @@ def process_traditional_format(input_dir: str, output_dir: str):
         annotations = task.get('annotations') or task.get('completions', [])
         if annotations:
             latest_annotation = annotations[-1]
-            for result in latest_annotation.get('result', []):
-                # 检查是否是矩形框标注，并且有原始尺寸信息
-                if result.get('type') == 'rectanglelabels' and 'original_width' in result:
-                    label_name = result['value']['rectanglelabels'][0]
-                    class_id = label_to_id.get(label_name, 0)
-                    
-                    x_c, y_c, w, h = convert_ls_to_yolo_bbox(result['value'])
-                    yolo_lines.append(f"{class_id} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}")
+            results = latest_annotation.get('result', [])
+
+            # --- 新逻辑：基于parentID关联bbox和keypoints ---
+            
+            # 1. 提取所有bboxes，用它们的ID作为索引
+            bboxes = {}
+            for r in results:
+                if r.get('type') == 'rectanglelabels' and 'id' in r:
+                    label_name = r['value']['rectanglelabels'][0]
+                    class_id = label_to_id.get(label_name)
+                    if class_id is None: continue
+
+                    x_c, y_c, w, h = convert_ls_to_yolo_bbox(r['value'])
+                    bboxes[r['id']] = {
+                        'class_id': class_id,
+                        'bbox': [x_c, y_c, w, h],
+                        'keypoints': []
+                    }
+
+            # 2. 提取所有keypoints，并根据parentID关联到bboxes
+            for r in results:
+                if r.get('type') == 'keypointlabels' and 'parentID' in r:
+                    parent_id = r.get('parentID')
+                    if parent_id in bboxes:
+                        x_kp, y_kp = convert_ls_to_yolo_keypoint(r['value'])
+                        # YOLO格式要求keypoint后面跟一个可见性标志 (0=不可见, 1=遮挡, 2=可见)
+                        bboxes[parent_id]['keypoints'].extend([x_kp, y_kp, 2])
+
+            # 3. 生成YOLO格式的行
+            for bbox_id, data in bboxes.items():
+                bbox_str = " ".join(f"{coord:.6f}" for coord in data['bbox'])
+                kpts_str = " ".join(f"{coord:.6f}" for coord in data['keypoints'])
+                
+                line = f"{data['class_id']} {bbox_str}"
+                if kpts_str:
+                    line += f" {kpts_str}"
+                yolo_lines.append(line)
         
         # 写入.txt文件，即使没有标注也要创建一个空文件
         with open(label_filepath, 'w', encoding='utf-8') as f:

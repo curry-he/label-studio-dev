@@ -16,7 +16,7 @@ def get_pachyderm_client():
         client = pachyderm_sdk.Client(
             host='localhost',
             port=80,
-            auth_token='f6878d3748ae475ab57dc0b357104bb0',
+            auth_token='fee0a7ad808649bc8d571ddd019df50c',
             root_certs=None,
             transaction_id=None,
             tls=False

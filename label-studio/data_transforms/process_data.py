@@ -3,7 +3,7 @@ import json
 import time
 from PIL import Image
 # 假设 preprocessing 和 augmentation 模块在同一目录或可导入路径中
-from preprocessing import apply_preprocessing, transform_annotations as transform_annotations_preprocessing
+from preprocessing import apply_preprocessing
 from augmentation import apply_augmentation
 import glob # 导入 glob 模块用于更灵活的文件匹配
 
@@ -138,21 +138,24 @@ def main():
                 original_width, original_height = img.size
                 print(f"原始图片尺寸: {original_width}x{original_height}")
 
-                # 应用预处理
-                processed_img, pp_params = apply_preprocessing(img, config.get('preprocessing', []))
+                # 应用预处理 (使用新的albumentation接口)
+                processed_img, processed_annotations, pp_params = apply_preprocessing(
+                    img, annotations, config.get('preprocessing', [])
+                )
                 if pp_params:
                     print(f"预处理参数: {pp_params}")
                 
-                # 应用数据增强（根据配置决定是否增强）
+                # 应用数据增强 (使用新的albumentation接口)
                 augmentation_config = config.get('augmentation', [])
                 if augmentation_config:
-                    processed_img, transformed_annotations, aug_params = apply_augmentation(
-                        processed_img, annotations, augmentation_config
+                    final_img, final_annotations, aug_params = apply_augmentation(
+                        processed_img, processed_annotations, augmentation_config
                     )
                     if aug_params:
                         print(f"增强参数: {aug_params}")
                 else:
-                    transformed_annotations = annotations
+                    final_img = processed_img
+                    final_annotations = processed_annotations
                     aug_params = {}
 
                 # 确定输出路径，保持相对目录结构
@@ -162,16 +165,11 @@ def main():
                 os.makedirs(output_subdir, exist_ok=True)
 
                 # 保存处理后的图片
-                processed_img.save(output_image_path)
+                final_img.save(output_image_path)
                 print(f"保存图片: {output_image_path}")
 
-                # 转换和保存标注
-                if annotations:
-                    transform_params = {**pp_params, **aug_params}
-                    final_annotations = transform_annotations_preprocessing(
-                        transformed_annotations, transform_params, original_width, original_height
-                    )
-                    
+                # 保存变换后的标注
+                if final_annotations:
                     output_annotation_path = os.path.join(output_dir, 
                         os.path.splitext(rel_path)[0] + '.json')
                     with open(output_annotation_path, 'w', encoding='utf-8') as f:

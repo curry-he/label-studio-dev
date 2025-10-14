@@ -10,16 +10,11 @@ import { ImportPage } from "../../CreateProject/Import/Import";
 import { useImportPage } from "../../CreateProject/Import/useImportPage";
 import { VersionExportModal } from "./VersionExportModal";
 
-// Available preprocessing options
+// Available preprocessing options (只保留resize和grayscale)
 const PREPROCESSING_OPTIONS = {
-  "auto_orient": {
-    name: "Auto-Orient",
-    description: "Automatically adjusts image orientation based on EXIF data.",
-    params: []
-  },
   "resize": {
     name: "Resize",
-    description: "Resize the image to a specific size.",
+    description: "调整图像到指定尺寸",
     params: [
       { name: "width", type: "number", default: 640, label: "Width" },
       { name: "height", type: "number", default: 640, label: "Height" },
@@ -31,13 +26,15 @@ const PREPROCESSING_OPTIONS = {
         options: [
           { value: "stretch_to", label: "Stretch to" },
           { value: "fit_within", label: "Fit within" },
-          { value: "fill_center_crop", label: "Fill (with center crop) in" },
-          { value: "fit_black_edges", label: "Fit (black edges) in" },
-          { value: "fit_white_edges", label: "Fit (white edges) in" },
-          { value: "fit_reflect_edges", label: "Fit (reflect edges) in" },
+          { value: "fill_center_crop", label: "Fill (with center crop) in" }
         ]
       }
     ]
+  },
+  "grayscale": {
+    name: "Grayscale",
+    description: "将图像转换为灰度",
+    params: []
   }
 };
 
