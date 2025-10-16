@@ -16,7 +16,7 @@ def get_pachyderm_client():
         client = pachyderm_sdk.Client(
             host='localhost',
             port=80,
-            auth_token='fee0a7ad808649bc8d571ddd019df50c',
+            auth_token='dc0bfe2c249f45e893bda52b4483e742',
             root_certs=None,
             transaction_id=None,
             tls=False
@@ -1017,13 +1017,301 @@ def check_export_exists_in_persistent_repo(client: pachyderm_sdk.Client, export_
 
 def generate_export_key(project_id: int, version_id: int, export_format: str) -> str:
     """生成导出的唯一标识
-    
+
     Args:
         project_id: 项目ID
-        version_id: 版本ID  
+        version_id: 版本ID
         export_format: 导出格式
-        
+
     Returns:
         导出唯一标识字符串
     """
     return f"project-{project_id}-version-{version_id}-{export_format.lower()}"
+
+
+# ==================== 版本快照功能 ====================
+
+def ensure_version_snapshots_repo(client: pachyderm_sdk.Client):
+    """
+    确保版本快照仓库存在
+
+    Args:
+        client: Pachyderm客户端
+
+    Returns:
+        版本快照仓库名称
+    """
+    snapshot_repo_name = "version_snapshots"
+
+    try:
+        client.pfs.create_repo(repo=pfs.Repo(name=snapshot_repo_name, type="user"))
+        logger.info(f"成功创建版本快照仓库: {snapshot_repo_name}")
+    except Exception as e:
+        if "already exists" in str(e) or "has the same name" in str(e):
+            logger.info(f"版本快照仓库 {snapshot_repo_name} 已存在")
+        else:
+            logger.error(f"创建版本快照仓库失败: {e}")
+            raise
+
+    return snapshot_repo_name
+
+
+def create_version_snapshot(client: pachyderm_sdk.Client, project_id: int, version_id: int, config: dict):
+    """
+    创建版本快照 - 实现Roboflow的版本冻结
+
+    这一步将当前的raw_images和annotations复制到version_snapshots仓库
+    形成不可变的数据快照
+
+    Args:
+        client: Pachyderm客户端
+        project_id: 项目ID
+        version_id: 版本ID
+        config: 版本配置（包含split、preprocessing、augmentation等）
+
+    Returns:
+        snapshot_path: 快照路径
+    """
+    snapshot_repo = ensure_version_snapshots_repo(client)
+    snapshot_path = f"/project_{project_id}/version_{version_id}"
+
+    logger.info(f"开始创建版本快照: {snapshot_path}")
+
+    # 获取raw_images和annotations仓库的当前commit
+    raw_commit = get_master_commit_from_repo(client, "raw_images")
+    ann_commit = get_master_commit_from_repo(client, "annotations")
+
+    if not raw_commit:
+        raise Exception("raw_images仓库不存在或没有数据")
+    if not ann_commit:
+        raise Exception("annotations仓库不存在或没有数据")
+
+    with client.pfs.commit(branch=pfs.Branch.from_uri(f"{snapshot_repo}@master")) as commit:
+        # 1. 保存版本元数据
+        metadata = {
+            "version_id": version_id,
+            "project_id": project_id,
+            "created_at": time.time(),
+            "created_at_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "config": config,
+            "status": "frozen",
+            "source_commits": {
+                "raw_images": raw_commit.id,
+                "annotations": ann_commit.id
+            }
+        }
+
+        commit.put_file_from_bytes(
+            path=f"{snapshot_path}/_metadata.json",
+            data=json.dumps(metadata, indent=2, ensure_ascii=False).encode('utf-8')
+        )
+        logger.info(f"保存版本元数据到 {snapshot_path}/_metadata.json")
+
+        # 2. 复制标注文件（从annotations仓库）
+        logger.info(f"开始复制标注文件...")
+        ann_file_obj = pfs.File(commit=ann_commit, path="/")
+        ann_files = list(client.pfs.list_file(file=ann_file_obj))
+
+        annotation_count = 0
+        for file_info in ann_files:
+            if file_info.file_type == pfs.FileType.FILE:
+                file_path = file_info.file.path
+
+                # 跳过配置文件目录
+                if "_processing_config" in file_path:
+                    continue
+
+                # 只复制JSON文件
+                if file_path.lower().endswith('.json'):
+                    try:
+                        # 读取标注文件内容
+                        ann_file = pfs.File(commit=ann_commit, path=file_path)
+                        file_content = client.pfs.get_file(file=ann_file)
+
+                        # 处理不同的返回类型
+                        content_bytes = b''
+                        if hasattr(file_content, 'read'):
+                            content_bytes = file_content.read()
+                        else:
+                            for chunk in file_content:
+                                if hasattr(chunk, 'value'):
+                                    content_bytes += chunk.value
+                                elif isinstance(chunk, bytes):
+                                    content_bytes += chunk
+                                else:
+                                    content_bytes += bytes(chunk)
+
+                        # 解析JSON获取关联的图片文件名
+                        try:
+                            ann_data = json.loads(content_bytes.decode('utf-8'))
+                            image_path = ann_data.get('data', {}).get('image', '')
+                            if image_path:
+                                # 从路径中提取文件名
+                                image_filename = image_path.split('/')[-1]
+
+                                # 复制对应的图片文件
+                                try:
+                                    raw_file = pfs.File(commit=raw_commit, path=f"/{image_filename}")
+                                    image_content = client.pfs.get_file(file=raw_file)
+
+                                    # 处理图片内容
+                                    image_bytes = b''
+                                    if hasattr(image_content, 'read'):
+                                        image_bytes = image_content.read()
+                                    else:
+                                        for chunk in image_content:
+                                            if hasattr(chunk, 'value'):
+                                                image_bytes += chunk.value
+                                            elif isinstance(chunk, bytes):
+                                                image_bytes += chunk
+                                            else:
+                                                image_bytes += bytes(chunk)
+
+                                    # 保存图片到快照
+                                    commit.put_file_from_bytes(
+                                        path=f"{snapshot_path}/images/{image_filename}",
+                                        data=image_bytes
+                                    )
+
+                                    # 保存标注到快照
+                                    ann_filename = os.path.basename(file_path)
+                                    commit.put_file_from_bytes(
+                                        path=f"{snapshot_path}/annotations/{ann_filename}",
+                                        data=content_bytes
+                                    )
+
+                                    annotation_count += 1
+                                    logger.debug(f"复制图片-标注对: {image_filename} <-> {ann_filename}")
+
+                                except Exception as img_error:
+                                    logger.warning(f"复制图片 {image_filename} 失败: {img_error}")
+                                    # 即使图片复制失败，也继续处理其他文件
+
+                        except json.JSONDecodeError as json_error:
+                            logger.warning(f"解析标注文件 {file_path} 失败: {json_error}")
+                            continue
+
+                    except Exception as e:
+                        logger.error(f"复制标注文件 {file_path} 失败: {e}")
+                        continue
+
+        logger.info(f"版本快照创建完成: {snapshot_path}")
+        logger.info(f"快照包含 {annotation_count} 个图片-标注对")
+        logger.info(f"源commits: raw_images={raw_commit.id[:8]}, annotations={ann_commit.id[:8]}")
+
+    return snapshot_path
+
+
+def check_snapshot_exists(client: pachyderm_sdk.Client, snapshot_path: str) -> bool:
+    """
+    检查版本快照是否存在
+
+    Args:
+        client: Pachyderm客户端
+        snapshot_path: 快照路径
+
+    Returns:
+        bool: 快照是否存在
+    """
+    try:
+        snapshot_repo = "version_snapshots"
+        master_commit = get_master_commit_from_repo(client, snapshot_repo)
+
+        if not master_commit:
+            return False
+
+        # 检查快照目录是否存在
+        file_obj = pfs.File(commit=master_commit, path=snapshot_path)
+        files = list(client.pfs.list_file(file=file_obj))
+
+        return len(files) > 0
+
+    except Exception:
+        return False
+
+
+def load_version_config(client: pachyderm_sdk.Client, snapshot_path: str) -> dict:
+    """
+    从快照中加载版本配置
+
+    Args:
+        client: Pachyderm客户端
+        snapshot_path: 快照路径
+
+    Returns:
+        dict: 版本配置
+    """
+    try:
+        snapshot_repo = "version_snapshots"
+        master_commit = get_master_commit_from_repo(client, snapshot_repo)
+
+        if not master_commit:
+            raise Exception(f"版本快照仓库没有master分支")
+
+        # 读取元数据文件
+        metadata_path = f"{snapshot_path}/_metadata.json"
+        file_obj = pfs.File(commit=master_commit, path=metadata_path)
+        file_content = client.pfs.get_file(file=file_obj)
+
+        # 处理内容
+        content_bytes = b''
+        if hasattr(file_content, 'read'):
+            content_bytes = file_content.read()
+        else:
+            for chunk in file_content:
+                if hasattr(chunk, 'value'):
+                    content_bytes += chunk.value
+                elif isinstance(chunk, bytes):
+                    content_bytes += chunk
+                else:
+                    content_bytes += bytes(chunk)
+
+        metadata = json.loads(content_bytes.decode('utf-8'))
+        return metadata.get('config', {})
+
+    except Exception as e:
+        logger.error(f"加载版本配置失败: {e}")
+        return {}
+
+
+def create_snapshot_processing_pipeline(pipeline_name: str, snapshot_path: str, config: dict) -> dict:
+    """
+    创建基于快照的处理管道
+
+    关键：输入是version_snapshots仓库的特定路径，不会被新数据触发
+
+    Args:
+        pipeline_name: 管道名称
+        snapshot_path: 快照路径
+        config: 处理配置
+
+    Returns:
+        dict: 管道规范
+    """
+    spec = {
+        "pipeline": {
+            "name": pipeline_name,
+            "project": {"name": "default"}
+        },
+        "description": f"处理版本快照: {snapshot_path}",
+        "input": {
+            "pfs": {
+                "repo": "version_snapshots",
+                "glob": f"{snapshot_path}/",
+                "empty_files": False
+            }
+        },
+        "transform": {
+            "image": "localhost:5000/ls-processor:latest",
+            "cmd": ["python", "/app/process_snapshot.py"],
+            "env": {
+                "SNAPSHOT_PATH": snapshot_path,
+                "CONFIG": json.dumps(config, ensure_ascii=False)
+            }
+        }
+    }
+
+    logger.info(f"创建快照处理管道: {pipeline_name}")
+    logger.info(f"输入快照: {snapshot_path}")
+
+    return spec

@@ -1,3 +1,15 @@
+"""
+版本快照处理脚本
+
+从version_snapshots仓库读取冻结的数据版本，应用预处理和增强，输出处理后的数据集。
+
+关键特性：
+1. 输入：版本快照（不可变数据）
+2. 差异化增强：预处理应用于所有分割，增强仅应用于训练集
+3. 标签同步：使用AnnotationTracker确保标签与图片变换同步
+4. 验证机制：自动验证标注坐标并生成可视化
+"""
+
 import os
 import json
 import time
@@ -6,84 +18,196 @@ from PIL import Image
 from preprocessing import apply_preprocessing
 from augmentation import apply_augmentation
 from validate_annotations import validate_annotation_coordinates, visualize_annotations
-import glob
 
-def extract_original_filename(annotation_data):
+
+def load_snapshot_metadata(snapshot_base_dir):
     """
-    从Label Studio标注数据中提取原始图片文件名
+    从快照目录加载元数据
+
+    Args:
+        snapshot_base_dir: 快照基础目录 (例如 /pfs/version_snapshots/project_1/version_1)
+
+    Returns:
+        dict: 元数据字典，包含config
     """
+    metadata_path = os.path.join(snapshot_base_dir, "_metadata.json")
+
+    if not os.path.exists(metadata_path):
+        print(f"⚠️ 未找到元数据文件: {metadata_path}")
+        return {}
+
     try:
-        image_path = annotation_data.get('data', {}).get('image', '')
-        if image_path:
-            # 从 s3://master.raw_images.default/1731985516.0423145.jpg 中提取文件名
-            filename = image_path.split('/')[-1]
-            return filename
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        print(f"✅ 成功加载快照元数据")
+        print(f"   版本ID: {metadata.get('version_id')}")
+        print(f"   项目ID: {metadata.get('project_id')}")
+        print(f"   创建时间: {metadata.get('created_at_str')}")
+        print(f"   状态: {metadata.get('status')}")
+        return metadata
     except Exception as e:
-        print(f"提取文件名失败: {e}")
-    return None
+        print(f"❌ 加载元数据失败: {e}")
+        return {}
+
+
+def find_snapshot_data(snapshot_base_dir):
+    """
+    扫描快照目录，匹配图片和标注对
+
+    快照结构:
+    /project_X/version_Y/
+        _metadata.json
+        images/
+            image1.jpg
+            image2.jpg
+        annotations/
+            image1.json
+            image2.json
+
+    Args:
+        snapshot_base_dir: 快照基础目录
+
+    Returns:
+        list: [(image_path, annotation_path, annotation_data), ...]
+    """
+    print(f"\n=== 扫描快照数据: {snapshot_base_dir} ===")
+
+    images_dir = os.path.join(snapshot_base_dir, "images")
+    annotations_dir = os.path.join(snapshot_base_dir, "annotations")
+
+    if not os.path.exists(images_dir):
+        print(f"❌ 图片目录不存在: {images_dir}")
+        return []
+
+    if not os.path.exists(annotations_dir):
+        print(f"❌ 标注目录不存在: {annotations_dir}")
+        return []
+
+    # 扫描图片文件（构建文件名到路径的映射）
+    image_files = {}
+    for filename in os.listdir(images_dir):
+        if filename.lower().endswith(('.jpg', '.png', '.jpeg')):
+            image_path = os.path.join(images_dir, filename)
+            # 使用完整文件名作为键，方便通过标注中的图片路径匹配
+            image_files[filename] = image_path
+
+    print(f"找到 {len(image_files)} 个图片文件")
+    if image_files:
+        print(f"图片列表示例: {list(image_files.keys())[:3]}")
+
+    # 扫描标注文件并通过标注内容中的图片路径匹配
+    matched_pairs = []
+    for filename in os.listdir(annotations_dir):
+        if filename.lower().endswith('.json'):
+            annotation_path = os.path.join(annotations_dir, filename)
+
+            try:
+                with open(annotation_path, 'r', encoding='utf-8') as f:
+                    annotation_data = json.load(f)
+
+                # 从标注数据中提取图片路径
+                image_url = annotation_data.get('data', {}).get('image', '')
+                if image_url:
+                    # 提取文件名（去掉URL前缀）
+                    image_filename = image_url.split('/')[-1]
+
+                    # 查找匹配的图片
+                    if image_filename in image_files:
+                        matched_pairs.append((
+                            image_files[image_filename],
+                            annotation_path,
+                            annotation_data
+                        ))
+                        print(f"✅ 匹配: {filename} -> {image_filename}")
+                    else:
+                        print(f"⚠️ 标注 {filename} 引用的图片 {image_filename} 不存在")
+                else:
+                    print(f"⚠️ 标注 {filename} 中没有图片路径信息")
+
+            except Exception as e:
+                print(f"❌ 读取标注失败 {filename}: {e}")
+
+    print(f"=== 共找到 {len(matched_pairs)} 个有效图片-标注对 ===")
+    return matched_pairs
+
 
 def split_dataset(matched_pairs, split_config):
     """
     根据配置划分数据集
-    split_config: {"enabled": True, "train": 70, "test": 20, "valid": 10}
-    返回: {"train": [...], "test": [...], "valid": [...]}
+
+    Args:
+        matched_pairs: 图片-标注对列表
+        split_config: {"enabled": True, "train": 70, "test": 20, "valid": 10}
+
+    Returns:
+        dict: {"train": [...], "test": [...], "valid": [...]}
     """
     if not split_config.get("enabled", False):
         return {"all": matched_pairs}
-    
+
     print(f"\n=== 开始数据集划分 ===")
     print(f"总数据量: {len(matched_pairs)}")
-    
-    # 随机打乱数据，确保随机性
+
+    # 随机打乱数据
     shuffled_pairs = matched_pairs.copy()
     random.shuffle(shuffled_pairs)
-    
+
     # 获取划分比例
     train_ratio = split_config.get("train", 70) / 100.0
     test_ratio = split_config.get("test", 20) / 100.0
     valid_ratio = split_config.get("valid", 10) / 100.0
-    
-    # 计算各个分割的数量
+
+    # 计算各分割数量
     total = len(shuffled_pairs)
     train_count = int(total * train_ratio)
     test_count = int(total * test_ratio)
-    valid_count = total - train_count - test_count  # 剩余全部给valid，避免舍入误差
-    
+    valid_count = total - train_count - test_count
+
     # 划分数据
     splits = {
         "train": shuffled_pairs[:train_count],
         "test": shuffled_pairs[train_count:train_count + test_count],
         "valid": shuffled_pairs[train_count + test_count:]
     }
-    
+
     print(f"划分结果:")
     print(f"  🚂 Train: {len(splits['train'])} 样本 ({len(splits['train'])/total*100:.1f}%)")
     print(f"  🧪 Test:  {len(splits['test'])} 样本 ({len(splits['test'])/total*100:.1f}%)")
     print(f"  ✅ Valid: {len(splits['valid'])} 样本 ({len(splits['valid'])/total*100:.1f}%)")
-    
+
     return splits
+
 
 def process_split(split_name, matched_pairs, config, output_base_dir):
     """
-    处理单个数据集分割 - 支持差异化增强和验证
+    处理单个数据集分割 - 差异化增强和验证
 
     预处理：应用于所有分割（train/test/valid）
     增强：仅应用于训练集（train）
+
+    Args:
+        split_name: 分割名称 (train/test/valid)
+        matched_pairs: 该分割的图片-标注对
+        config: 处理配置
+        output_base_dir: 输出根目录
+
+    Returns:
+        (processed_count, error_count): 成功和失败计数
     """
     print(f"\n=== 处理 {split_name.upper()} 分割 ===")
     print(f"样本数量: {len(matched_pairs)}")
 
-    # 创建分割子目录（即使为空也创建）
+    # 创建分割子目录
     split_dir = os.path.join(output_base_dir, split_name)
     os.makedirs(split_dir, exist_ok=True)
     print(f"创建分割目录: {split_dir}")
 
-    # 创建验证目录（用于存储验证失败的可视化）
+    # 创建验证目录
     validation_dir = os.path.join(output_base_dir, f"{split_name}_validation")
     os.makedirs(validation_dir, exist_ok=True)
 
     if not matched_pairs:
-        print(f"⚠️ {split_name} 分割为空，但已创建目录结构")
+        print(f"⚠️ {split_name} 分割为空")
         return 0, 0
 
     # 确定是否应用增强（仅训练集）
@@ -102,7 +226,7 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
         try:
             print(f"处理: {os.path.basename(image_path)} -> {split_name}/")
 
-            # 从标注数据中提取annotations
+            # 提取标注
             annotations = annotation_data.get('annotations', [])
 
             # 加载和处理图片
@@ -112,7 +236,7 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
                     img, annotations, config.get('preprocessing', [])
                 )
 
-                # 步骤2：数据增强（仅训练集应用）
+                # 步骤2：数据增强（仅训练集）
                 if apply_augmentation_flag:
                     augmentation_config = config.get('augmentation', [])
                     if augmentation_config:
@@ -141,7 +265,7 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
                     output_annotation_filename = f"{os.path.splitext(original_filename)[0]}.json"
                     output_annotation_path = os.path.join(split_dir, output_annotation_filename)
 
-                    # 保存完整的标注数据结构，保持Label Studio格式
+                    # 保存完整的标注数据结构
                     output_annotation_data = {
                         **annotation_data,
                         'annotations': final_annotations,
@@ -155,7 +279,7 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
                         json.dump(output_annotation_data, f, indent=2, ensure_ascii=False)
                     print(f"💾 保存标注: {split_name}/{output_annotation_filename}")
 
-                    # ✅ 验证标注
+                    # 验证标注
                     is_valid, issues = validate_annotation_coordinates(
                         output_image_path,
                         output_annotation_data
@@ -167,7 +291,7 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
                         for issue in issues:
                             print(f"    {issue}")
 
-                        # 生成可视化图片用于调试
+                        # 生成可视化
                         vis_path = os.path.join(validation_dir, original_filename)
                         visualize_annotations(output_image_path, output_annotation_data, vis_path)
 
@@ -187,141 +311,120 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
 
     return processed_count, error_count
 
-def find_matching_pairs():
-    """
-    基于标注数据中的原始文件名信息，匹配图片和标注文件
-    """
-    print("=== 开始智能匹配图片和标注文件 ===")
-    
-    # 扫描原始图片
-    raw_images = []
-    if os.path.exists("/pfs/raw_images"):
-        for root, dirs, files in os.walk("/pfs/raw_images"):
-            for file in files:
-                if file.lower().endswith(('.jpg', '.png', '.jpeg')):
-                    raw_images.append(os.path.join(root, file))
-    
-    print(f"找到 {len(raw_images)} 个图片文件:")
-    for img in raw_images[:5]:  # 显示前5个
-        print(f"  📸 {os.path.basename(img)}")
-    
-    # 扫描标注文件（过滤掉配置文件目录）
-    annotations = []
-    if os.path.exists("/pfs/annotations"):
-        for root, dirs, files in os.walk("/pfs/annotations"):
-            # 过滤掉配置文件目录
-            if "_processing_config" in root:
-                print(f"跳过配置目录: {root}")
-                continue
-                
-            for file in files:
-                if file.lower().endswith('.json'):
-                    # 额外检查：跳过明显的配置文件
-                    if file.lower() in ['config.json', 'processing_config.json']:
-                        print(f"跳过配置文件: {file}")
-                        continue
-                    annotations.append(os.path.join(root, file))
-    
-    print(f"找到 {len(annotations)} 个标注文件:")
-    for ann in annotations[:5]:  # 显示前5个
-        print(f"  📝 {os.path.basename(ann)}")
-    
-    # 建立匹配关系
-    matched_pairs = []
-    for ann_path in annotations:
-        try:
-            with open(ann_path, 'r', encoding='utf-8') as f:
-                ann_data = json.load(f)
-                
-            # 提取原始文件名
-            original_filename = extract_original_filename(ann_data)
-            
-            if not original_filename:
-                print(f"⚠️ 无法从 {os.path.basename(ann_path)} 中提取原始文件名")
-                continue
-                
-            # 查找匹配的图片
-            matched_img = None
-            for img_path in raw_images:
-                if os.path.basename(img_path) == original_filename:
-                    matched_img = img_path
-                    break
-            
-            if matched_img:
-                matched_pairs.append((matched_img, ann_path, ann_data))
-                print(f"✅ 匹配成功: {os.path.basename(matched_img)} <-> {os.path.basename(ann_path)}")
-            else:
-                print(f"❌ 未找到匹配图片: {original_filename} (来自 {os.path.basename(ann_path)})")
-                
-        except Exception as e:
-            print(f"❌ 处理标注文件 {ann_path} 时出错: {e}")
-    
-    print(f"=== 匹配完成，共找到 {len(matched_pairs)} 个有效图片-标注对 ===")
-    return matched_pairs
 
 def main():
     """
-    智能匹配模式的数据处理主函数 (支持数据集划分)
+    版本快照处理主函数
+
+    环境变量：
+    - SNAPSHOT_PATH: 快照路径 (例如 /project_1/version_1)
+    - CONFIG: JSON格式的配置字符串 (可选)
+
+    重要：Pachyderm的glob模式 "/project_X/version_Y/*" 会将匹配的文件直接挂载到
+    /pfs/version_snapshots/ 根目录，而不保留完整路径！
+    实际挂载：
+    - /pfs/version_snapshots/_metadata.json
+    - /pfs/version_snapshots/annotations/
+    - /pfs/version_snapshots/images/
     """
     start_time = time.time()
     output_dir = "/pfs/out"
     os.makedirs(output_dir, exist_ok=True)
-    
-    print("=== 智能匹配模式数据处理 (支持数据集划分) ===")
-    print(f"输出目录: {output_dir}")
-    
-    # 查找配置文件 - 支持新的配置文件位置
-    config_path = None
-    config_locations = [
-        "/pfs/annotations/_processing_config/config.json",  # 新位置（优先）
-        "/pfs/annotations/config.json",  # 旧位置（向后兼容）
-        "/pfs/raw_images/config.json"   # 最旧位置（向后兼容）
-    ]
-    
-    for potential_config in config_locations:
-        if os.path.exists(potential_config):
-            try:
-                with open(potential_config, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                config_path = potential_config
-                print(f"✅ 成功加载配置文件: {config_path}")
-                print(f"配置内容: {json.dumps(config, indent=2, ensure_ascii=False)}")
-                break
-            except Exception as e:
-                print(f"⚠️ 配置文件读取失败 {potential_config}: {e}")
-                continue
-    
-    if not config_path:
-        print("⚠️ 未找到有效的config.json，使用默认配置")
-        config = {}
 
-    # 智能匹配图片和标注
-    matched_pairs = find_matching_pairs()
-    
-    if not matched_pairs:
-        print("❌ 没有找到匹配的图片-标注对，无法继续处理")
+    print("=== 版本快照处理 ===")
+    print(f"输出目录: {output_dir}")
+
+    # 从环境变量获取快照路径（仅用于日志和元数据）
+    snapshot_path = os.environ.get('SNAPSHOT_PATH', '')
+    if not snapshot_path:
+        print("❌ 未设置SNAPSHOT_PATH环境变量")
         return
-    
+
+    print(f"快照路径（元数据）: {snapshot_path}")
+
+    # Pachyderm的glob模式 "/project_X/version_Y/*" 会保留目录结构
+    # 实际挂载：/pfs/version_snapshots/project_X/version_Y/
+    # 所以需要拼接完整路径
+    snapshot_base_dir = os.path.join("/pfs/version_snapshots", snapshot_path.lstrip('/'))
+
+    print(f"实际数据目录: {snapshot_base_dir}")
+
+    # 列出实际挂载的文件（用于调试）
+    print(f"📂 检查挂载的文件:")
+    pfs_root = "/pfs/version_snapshots"
+    if os.path.exists(pfs_root):
+        print(f"  /pfs/version_snapshots/ 内容:")
+        for item in os.listdir(pfs_root):
+            item_path = os.path.join(pfs_root, item)
+            if os.path.isdir(item_path):
+                print(f"    📁 {item}/")
+                # 列出子目录
+                for subitem in os.listdir(item_path):
+                    subitem_path = os.path.join(item_path, subitem)
+                    if os.path.isdir(subitem_path):
+                        print(f"      📁 {subitem}/")
+                    else:
+                        print(f"      📄 {subitem}")
+            else:
+                print(f"    📄 {item}")
+    else:
+        print(f"⚠️ 目录不存在: {pfs_root}")
+
+    if not os.path.exists(snapshot_base_dir):
+        print(f"❌ 快照目录不存在: {snapshot_base_dir}")
+        return
+
+    # 加载元数据
+    metadata = load_snapshot_metadata(snapshot_base_dir)
+
+    # 获取配置（优先使用环境变量，其次使用元数据中的配置）
+    config = {}
+    config_str = os.environ.get('CONFIG', '')
+
+    if config_str:
+        try:
+            config = json.loads(config_str)
+            print("✅ 从环境变量加载配置")
+        except Exception as e:
+            print(f"⚠️ 环境变量CONFIG解析失败: {e}")
+
+    if not config and 'config' in metadata:
+        config = metadata['config']
+        print("✅ 从元数据加载配置")
+
+    if not config:
+        print("⚠️ 未找到配置，使用默认配置")
+
+    print(f"配置内容: {json.dumps(config, indent=2, ensure_ascii=False)}")
+
+    # 扫描快照数据
+    matched_pairs = find_snapshot_data(snapshot_base_dir)
+
+    if not matched_pairs:
+        print("❌ 没有找到有效的图片-标注对")
+        return
+
     # 检查是否启用数据集划分
     split_config = config.get('split', {'enabled': False})
-    
+
     if split_config.get('enabled', False):
         print(f"\n🎯 启用数据集划分模式")
-        # 设置随机种子确保可重现性
+
+        # 设置随机种子
         if 'random_seed' in config:
             random.seed(config['random_seed'])
             print(f"使用随机种子: {config['random_seed']}")
-        
+
         # 执行数据集划分
         splits = split_dataset(matched_pairs, split_config)
-        
+
         # 处理每个分割
         total_processed = 0
         total_errors = 0
         split_results = {}
-        
+
         for split_name, split_pairs in splits.items():
-            if split_name != 'all':  # 跳过未启用划分时的'all'键
+            if split_name != 'all':
                 processed, errors = process_split(split_name, split_pairs, config, output_dir)
                 total_processed += processed
                 total_errors += errors
@@ -330,12 +433,13 @@ def main():
                     'processed': processed,
                     'errors': errors
                 }
-        
-        # 创建包含划分信息的处理报告
+
+        # 创建处理报告
         processing_report = {
-            "version_id": config.get('version_id'),
-            "project_id": config.get('project_id'),
-            "intelligent_matching": True,
+            "version_id": metadata.get('version_id') or config.get('version_id'),
+            "project_id": metadata.get('project_id') or config.get('project_id'),
+            "snapshot_path": snapshot_path,
+            "snapshot_mode": True,
             "dataset_split_enabled": True,
             "split_config": split_config,
             "split_results": split_results,
@@ -345,108 +449,91 @@ def main():
             "preprocessing_steps": config.get('preprocessing', []),
             "augmentation_steps": config.get('augmentation', []),
             "processing_time": time.time() - start_time,
+            "source_commits": metadata.get('source_commits', {}),
             "status": "completed" if total_errors == 0 else "completed_with_errors"
         }
-        
+
     else:
-        print(f"\n📁 使用传统处理模式 (不划分数据集)")
-        # 传统处理方式 - 向后兼容
+        print(f"\n📁 使用传统处理模式（不划分数据集）")
+
+        # 不划分，直接处理所有数据
         processed_count = 0
         error_count = 0
-        
+
         for image_path, annotation_path, annotation_data in matched_pairs:
             try:
                 print(f"\n--- 处理: {os.path.basename(image_path)} ---")
-                
-                # 从标注数据中提取annotations
-                annotations = annotation_data.get('annotations', [])
-                print(f"包含 {len(annotations)} 条标注")
-                
-                # 加载和处理图片
-                with Image.open(image_path) as img:
-                    original_width, original_height = img.size
-                    print(f"原始尺寸: {original_width}x{original_height}")
 
-                    # 应用预处理 (使用新的albumentation接口)
+                annotations = annotation_data.get('annotations', [])
+
+                with Image.open(image_path) as img:
+                    # 应用预处理
                     processed_img, processed_annotations, pp_params = apply_preprocessing(
                         img, annotations, config.get('preprocessing', [])
                     )
-                    if pp_params:
-                        print(f"预处理参数: {pp_params}")
-                    
-                    # 应用数据增强
+
+                    # 应用增强
                     augmentation_config = config.get('augmentation', [])
                     if augmentation_config:
                         final_img, final_annotations, aug_params = apply_augmentation(
                             processed_img, processed_annotations, augmentation_config
                         )
-                        if aug_params:
-                            print(f"增强参数: {aug_params}")
                     else:
                         final_img = processed_img
                         final_annotations = processed_annotations
-                        aug_params = {}
 
-                    # 确定输出路径
+                    # 保存
                     original_filename = os.path.basename(image_path)
                     output_image_path = os.path.join(output_dir, original_filename)
-
-                    # 保存处理后的图片
                     final_img.save(output_image_path)
-                    print(f"💾 保存图片: {output_image_path}")
 
-                    # 保存变换后的标注
                     if annotations:
-                        output_annotation_path = os.path.join(output_dir, 
-                            os.path.splitext(original_filename)[0] + '.json')
-                        
-                        # 保存完整的标注数据结构，保持Label Studio格式
+                        output_annotation_path = os.path.join(
+                            output_dir,
+                            os.path.splitext(original_filename)[0] + '.json'
+                        )
+
                         output_annotation_data = {
                             **annotation_data,
                             'annotations': final_annotations,
-                            'processed_at': time.time(),
-                            'processing_config': config
+                            'processed_at': time.time()
                         }
-                        
+
                         with open(output_annotation_path, 'w', encoding='utf-8') as f:
                             json.dump(output_annotation_data, f, indent=2, ensure_ascii=False)
-                        print(f"💾 保存标注: {output_annotation_path}")
-                    
+
                     processed_count += 1
-                    
+
             except Exception as e:
-                print(f"❌ 处理 {os.path.basename(image_path)} 失败: {e}")
+                print(f"❌ 处理失败: {e}")
                 error_count += 1
                 import traceback
                 traceback.print_exc()
 
-        # 创建传统模式的处理报告
+        # 创建传统模式报告
         processing_report = {
-            "version_id": config.get('version_id'),
-            "project_id": config.get('project_id'),
-            "intelligent_matching": True,
+            "version_id": metadata.get('version_id') or config.get('version_id'),
+            "project_id": metadata.get('project_id') or config.get('project_id'),
+            "snapshot_path": snapshot_path,
+            "snapshot_mode": True,
             "dataset_split_enabled": False,
-            "total_images_found": len([p[0] for p in matched_pairs]),
-            "total_annotations_found": len([p[1] for p in matched_pairs]),
-            "matched_pairs": len(matched_pairs),
+            "total_matched_pairs": len(matched_pairs),
             "processed_pairs": processed_count,
             "failed_pairs": error_count,
             "preprocessing_steps": config.get('preprocessing', []),
             "augmentation_steps": config.get('augmentation', []),
             "processing_time": time.time() - start_time,
+            "source_commits": metadata.get('source_commits', {}),
             "status": "completed" if error_count == 0 else "completed_with_errors"
         }
-    
-    # 生成唯一的处理报告文件名（避免Cross input重复文件冲突）
-    import hashlib
-    datum_hash = hashlib.md5(f"{len(matched_pairs)}_{start_time}".encode()).hexdigest()[:8]
-    report_filename = f'processing_report_{datum_hash}.json'
-    report_path = os.path.join(output_dir, report_filename)
+
+    # 保存处理报告
+    report_path = os.path.join(output_dir, 'processing_report.json')
     with open(report_path, 'w', encoding='utf-8') as f:
         json.dump(processing_report, f, indent=2, ensure_ascii=False)
     print(f"\n📊 处理报告保存至: {report_path}")
-    
-    print(f"\n=== 智能匹配处理完成 ===")
+
+    print(f"\n=== 版本快照处理完成 ===")
     if split_config.get('enabled', False):
         print(f"划分模式: 启用")
         for split_name, result in processing_report.get('split_results', {}).items():
@@ -456,6 +543,7 @@ def main():
         print(f"传统模式: 成功 {processing_report.get('processed_pairs', 0)}, 失败 {processing_report.get('failed_pairs', 0)}")
     print(f"处理耗时: {time.time() - start_time:.2f}秒")
     print(f"输出目录: {output_dir}")
+
 
 if __name__ == "__main__":
     main()
