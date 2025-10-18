@@ -445,6 +445,7 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
   const [currentProject, setCurrentProject] = useState(project);
   const [preprocessingSteps, setPreprocessingSteps] = useState([]);
   const [augmentationSteps, setAugmentationSteps] = useState([]);
+  const [augmentationMultiplier, setAugmentationMultiplier] = useState(2); // 新增：增强倍数状态
 
   // 当project prop更新时，同步更新本地状态
   useEffect(() => {
@@ -466,6 +467,7 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
       version: `v${versions.length + 1}`,
       preprocessing_config: preprocessingSteps,
       augmentation_config: augmentationSteps,
+      augmentation_multiplier: augmentationMultiplier, // 新增：发送增强倍数
       split_config: splitEnabled ? {
         enabled: true,
         train: splitConfig.train,
@@ -802,7 +804,84 @@ const CreateVersionForm = ({ onVersionCreated, versions, project, onUploadFinish
                       + Add Augmentation Step
                     </Button>
 
-                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    {/* Augmentation Multiplier Section */}
+                    {augmentationSteps.length > 0 && splitEnabled && (
+                      <div style={{
+                        marginTop: '30px',
+                        padding: '20px',
+                        border: '1px solid #e0e0e0',
+                        borderRadius: '4px',
+                        backgroundColor: '#f9f9f9'
+                      }}>
+                        <h4 style={{ marginTop: 0, marginBottom: '15px' }}>Maximum Version Size (Augmentation Multiplier)</h4>
+                        <p style={{ color: '#666', fontSize: '14px', marginBottom: '15px' }}>
+                          Choose how many variants to generate for each training image. This multiplier applies only to the training set.
+                        </p>
+
+                        <div style={{ marginBottom: '15px' }}>
+                          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+                            Multiplier:
+                          </label>
+                          <select
+                            value={augmentationMultiplier}
+                            onChange={(e) => setAugmentationMultiplier(parseInt(e.target.value))}
+                            style={{
+                              width: '200px',
+                              padding: '8px',
+                              fontSize: '14px',
+                              border: '1px solid #ccc',
+                              borderRadius: '4px'
+                            }}
+                          >
+                            <option value={1}>1x (No augmentation - original only)</option>
+                            <option value={2}>2x (1 original + 1 augmented)</option>
+                            <option value={3}>3x (1 original + 2 augmented)</option>
+                            <option value={4}>4x (1 original + 3 augmented)</option>
+                            <option value={5}>5x (1 original + 4 augmented)</option>
+                          </select>
+                        </div>
+
+                        {currentProject && splitConfig && (
+                          <div style={{
+                            padding: '15px',
+                            backgroundColor: '#fff',
+                            border: '1px solid #ddd',
+                            borderRadius: '4px'
+                          }}>
+                            <h5 style={{ margin: '0 0 10px 0' }}>Output Size Estimate:</h5>
+                            {(() => {
+                              const totalImages = currentProject.task_number || 0;
+                              const trainCount = Math.round(totalImages * (splitConfig.train / 100));
+                              const validCount = Math.round(totalImages * (splitConfig.valid / 100));
+                              const testCount = totalImages - trainCount - validCount;
+
+                              const trainOutputCount = trainCount * augmentationMultiplier;
+                              const totalOutputCount = trainOutputCount + validCount + testCount;
+
+                              return (
+                                <div style={{ fontSize: '14px' }}>
+                                  <p style={{ margin: '5px 0' }}>
+                                    <strong>Train Set:</strong> {trainCount} images × {augmentationMultiplier}x = <strong>{trainOutputCount} images</strong>
+                                  </p>
+                                  <p style={{ margin: '5px 0' }}>
+                                    <strong>Valid Set:</strong> {validCount} images (no augmentation)
+                                  </p>
+                                  <p style={{ margin: '5px 0' }}>
+                                    <strong>Test Set:</strong> {testCount} images (no augmentation)
+                                  </p>
+                                  <hr style={{ margin: '10px 0', border: 'none', borderTop: '1px solid #ddd' }} />
+                                  <p style={{ margin: '5px 0', fontSize: '16px' }}>
+                                    <strong>Total Output:</strong> {totalImages} → <strong style={{ color: '#1976d2' }}>{totalOutputCount} images</strong>
+                                  </p>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '20px' }}>
                       <Button onClick={() => setActiveStep(5)} primary>Continue</Button>
                     </div>
                   </>

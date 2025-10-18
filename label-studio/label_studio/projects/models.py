@@ -1542,6 +1542,10 @@ class DatasetVersion(models.Model):
     preprocessing_config = models.JSONField(default=dict, blank=True)
     split_config = models.JSONField(default=dict, blank=True)
     augmentation_config = models.JSONField(default=dict, blank=True)
+    augmentation_multiplier = models.IntegerField(
+        default=1,
+        help_text='Augmentation multiplier for training set (1-5)'
+    )
     status = models.CharField(
         _('status'), max_length=64, choices=Status.choices, default=Status.CREATED
     )

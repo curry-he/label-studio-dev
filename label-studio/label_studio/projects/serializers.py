@@ -430,6 +430,7 @@ class DatasetVersionSerializer(serializers.ModelSerializer):
             'split_config',
             'preprocessing_config',
             'augmentation_config',
+            'augmentation_multiplier',
             'split_stats',
             'split_details',  # 添加新字段
             'task_count',

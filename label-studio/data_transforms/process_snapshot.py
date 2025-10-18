@@ -180,10 +180,10 @@ def split_dataset(matched_pairs, split_config):
 
 def process_split(split_name, matched_pairs, config, output_base_dir):
     """
-    处理单个数据集分割 - 差异化增强和验证
+    处理单个数据集分割 - 差异化增强和验证（支持增强倍数）
 
     预处理：应用于所有分割（train/test/valid）
-    增强：仅应用于训练集（train）
+    增强：仅应用于训练集（train），支持增强倍数生成多个变体
 
     Args:
         split_name: 分割名称 (train/test/valid)
@@ -192,10 +192,10 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
         output_base_dir: 输出根目录
 
     Returns:
-        (processed_count, error_count): 成功和失败计数
+        (processed_count, error_count, variant_count): 成功计数、失败计数、总变体数
     """
     print(f"\n=== 处理 {split_name.upper()} 分割 ===")
-    print(f"样本数量: {len(matched_pairs)}")
+    print(f"原始样本数量: {len(matched_pairs)}")
 
     # 创建分割子目录
     split_dir = os.path.join(output_base_dir, split_name)
@@ -208,94 +208,183 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
 
     if not matched_pairs:
         print(f"⚠️ {split_name} 分割为空")
-        return 0, 0
+        return 0, 0, 0
 
     # 确定是否应用增强（仅训练集）
     apply_augmentation_flag = (split_name == 'train')
 
+    # 获取增强倍数（仅训练集使用）
+    augmentation_multiplier = 1
     if apply_augmentation_flag:
-        print(f"✨ {split_name} 分割：应用预处理 + 数据增强")
+        augmentation_multiplier = config.get('augmentation_multiplier', 1)
+        if augmentation_multiplier < 1:
+            augmentation_multiplier = 1
+
+    # 显示处理模式
+    if apply_augmentation_flag:
+        if augmentation_multiplier == 1:
+            print(f"🔧 {split_name} 分割：应用预处理（不增强，仅保留原图）")
+        else:
+            augmentation_config = config.get('augmentation', [])
+            if augmentation_config:
+                print(f"✨ {split_name} 分割：应用预处理 + 数据增强 ({augmentation_multiplier}x)")
+                print(f"   每张图片将生成: 1个原图 + {augmentation_multiplier - 1}个增强变体")
+            else:
+                print(f"🔧 {split_name} 分割：应用预处理（配置中无增强步骤）")
+                augmentation_multiplier = 1  # 强制为1
     else:
         print(f"🔧 {split_name} 分割：仅应用预处理（不增强）")
 
     processed_count = 0
     error_count = 0
     validation_errors = 0
+    total_variants = 0  # 总变体数（包括原图和所有增强变体）
 
-    for image_path, annotation_path, annotation_data in matched_pairs:
+    # 获取基础随机种子
+    base_random_seed = config.get('random_seed', int(time.time()))
+
+    for idx, (image_path, annotation_path, annotation_data) in enumerate(matched_pairs):
         try:
-            print(f"处理: {os.path.basename(image_path)} -> {split_name}/")
+            original_filename = os.path.basename(image_path)
+            base_name = os.path.splitext(original_filename)[0]
+            file_ext = os.path.splitext(original_filename)[1]
+
+            print(f"\n处理 [{idx+1}/{len(matched_pairs)}]: {original_filename} -> {split_name}/")
 
             # 提取标注
             annotations = annotation_data.get('annotations', [])
 
-            # 加载和处理图片
+            # 加载原始图片
             with Image.open(image_path) as img:
                 # 步骤1：预处理（所有分割都应用）
-                processed_img, processed_annotations, pp_params = apply_preprocessing(
+                preprocessed_img, preprocessed_annotations, pp_params = apply_preprocessing(
                     img, annotations, config.get('preprocessing', [])
                 )
 
-                # 步骤2：数据增强（仅训练集）
-                if apply_augmentation_flag:
+                # 步骤2：根据分割类型和增强倍数处理
+                if apply_augmentation_flag and augmentation_multiplier > 1:
                     augmentation_config = config.get('augmentation', [])
-                    if augmentation_config:
-                        final_img, final_annotations, aug_params = apply_augmentation(
-                            processed_img, processed_annotations, augmentation_config
+
+                    # 2.1 保存原图（预处理后，未增强）
+                    original_output_filename = f"{base_name}_original{file_ext}"
+                    original_output_path = os.path.join(split_dir, original_output_filename)
+                    preprocessed_img.save(original_output_path)
+                    print(f"  💾 [原图] {original_output_filename}")
+
+                    # 保存原图标注
+                    if annotations:
+                        original_ann_filename = f"{base_name}_original.json"
+                        original_ann_path = os.path.join(split_dir, original_ann_filename)
+                        original_ann_data = {
+                            **annotation_data,
+                            'annotations': preprocessed_annotations,
+                            'processed_at': time.time(),
+                            'split': split_name,
+                            'variant_type': 'original',
+                            'preprocessing_applied': bool(config.get('preprocessing')),
+                            'augmentation_applied': False
+                        }
+                        # 更新data.image路径以匹配新的文件名
+                        if 'data' in original_ann_data and 'image' in original_ann_data['data']:
+                            original_ann_data['data']['image'] = original_output_filename
+                        
+                        with open(original_ann_path, 'w', encoding='utf-8') as f:
+                            json.dump(original_ann_data, f, indent=2, ensure_ascii=False)
+
+                    total_variants += 1
+
+                    # 2.2 生成增强变体（N-1个）
+                    for variant_idx in range(1, augmentation_multiplier):
+                        # 使用不同的随机种子确保每个变体不同
+                        variant_seed = base_random_seed + idx * 1000 + variant_idx
+                        random.seed(variant_seed)
+
+                        augmented_img, augmented_annotations, aug_params = apply_augmentation(
+                            preprocessed_img, preprocessed_annotations, augmentation_config
                         )
-                        print(f"  ✅ 应用增强: {len(augmentation_config)} 个操作")
-                    else:
-                        final_img = processed_img
-                        final_annotations = processed_annotations
-                        print(f"  ⚠️ 配置中无增强步骤")
+
+                        # 保存增强变体图片
+                        variant_filename = f"{base_name}_aug{variant_idx}{file_ext}"
+                        variant_path = os.path.join(split_dir, variant_filename)
+                        augmented_img.save(variant_path)
+                        print(f"  ✨ [变体{variant_idx}] {variant_filename}")
+
+                        # 保存增强变体标注
+                        if annotations:
+                            variant_ann_filename = f"{base_name}_aug{variant_idx}.json"
+                            variant_ann_path = os.path.join(split_dir, variant_ann_filename)
+                            variant_ann_data = {
+                                **annotation_data,
+                                'annotations': augmented_annotations,
+                                'processed_at': time.time(),
+                                'split': split_name,
+                                'variant_type': f'augmented_{variant_idx}',
+                                'variant_seed': variant_seed,
+                                'preprocessing_applied': bool(config.get('preprocessing')),
+                                'augmentation_applied': True,
+                                'augmentation_params': aug_params
+                            }
+                            # 更新data.image路径以匹配新的文件名
+                            if 'data' in variant_ann_data and 'image' in variant_ann_data['data']:
+                                variant_ann_data['data']['image'] = variant_filename
+                            
+                            with open(variant_ann_path, 'w', encoding='utf-8') as f:
+                                json.dump(variant_ann_data, f, indent=2, ensure_ascii=False)
+
+                            # 验证增强变体标注
+                            is_valid, issues = validate_annotation_coordinates(
+                                variant_path,
+                                variant_ann_data
+                            )
+                            if not is_valid:
+                                validation_errors += 1
+                                print(f"    ⚠️ 标注验证失败")
+                                for issue in issues:
+                                    print(f"      {issue}")
+                                vis_path = os.path.join(validation_dir, variant_filename)
+                                visualize_annotations(variant_path, variant_ann_data, vis_path)
+
+                        total_variants += 1
+
+                    processed_count += 1
+
                 else:
-                    # 测试集和验证集：跳过增强
-                    final_img = processed_img
-                    final_annotations = processed_annotations
-                    print(f"  ⏭️ 跳过增强（非训练集）")
+                    # 非训练集 或 训练集但multiplier=1：只保存预处理后的原图
+                    output_filename = original_filename
+                    output_path = os.path.join(split_dir, output_filename)
+                    preprocessed_img.save(output_path)
+                    print(f"  💾 {output_filename}")
 
-                # 保存处理后的图片
-                original_filename = os.path.basename(image_path)
-                output_image_path = os.path.join(split_dir, original_filename)
-                final_img.save(output_image_path)
-                print(f"💾 保存图片: {split_name}/{original_filename}")
+                    # 保存标注
+                    if annotations:
+                        output_ann_filename = f"{base_name}.json"
+                        output_ann_path = os.path.join(split_dir, output_ann_filename)
+                        output_ann_data = {
+                            **annotation_data,
+                            'annotations': preprocessed_annotations,
+                            'processed_at': time.time(),
+                            'split': split_name,
+                            'preprocessing_applied': bool(config.get('preprocessing')),
+                            'augmentation_applied': False
+                        }
+                        with open(output_ann_path, 'w', encoding='utf-8') as f:
+                            json.dump(output_ann_data, f, indent=2, ensure_ascii=False)
 
-                # 保存变换后的标注
-                if annotations:
-                    output_annotation_filename = f"{os.path.splitext(original_filename)[0]}.json"
-                    output_annotation_path = os.path.join(split_dir, output_annotation_filename)
+                        # 验证标注
+                        is_valid, issues = validate_annotation_coordinates(
+                            output_path,
+                            output_ann_data
+                        )
+                        if not is_valid:
+                            validation_errors += 1
+                            print(f"  ⚠️ 标注验证失败")
+                            for issue in issues:
+                                print(f"    {issue}")
+                            vis_path = os.path.join(validation_dir, output_filename)
+                            visualize_annotations(output_path, output_ann_data, vis_path)
 
-                    # 保存完整的标注数据结构
-                    output_annotation_data = {
-                        **annotation_data,
-                        'annotations': final_annotations,
-                        'processed_at': time.time(),
-                        'split': split_name,
-                        'preprocessing_applied': bool(config.get('preprocessing')),
-                        'augmentation_applied': apply_augmentation_flag and bool(config.get('augmentation'))
-                    }
-
-                    with open(output_annotation_path, 'w', encoding='utf-8') as f:
-                        json.dump(output_annotation_data, f, indent=2, ensure_ascii=False)
-                    print(f"💾 保存标注: {split_name}/{output_annotation_filename}")
-
-                    # 验证标注
-                    is_valid, issues = validate_annotation_coordinates(
-                        output_image_path,
-                        output_annotation_data
-                    )
-
-                    if not is_valid:
-                        validation_errors += 1
-                        print(f"⚠️ 标注验证失败: {original_filename}")
-                        for issue in issues:
-                            print(f"    {issue}")
-
-                        # 生成可视化
-                        vis_path = os.path.join(validation_dir, original_filename)
-                        visualize_annotations(output_image_path, output_annotation_data, vis_path)
-
-                processed_count += 1
+                    total_variants += 1
+                    processed_count += 1
 
         except Exception as e:
             print(f"❌ 处理 {os.path.basename(image_path)} 失败: {e}")
@@ -303,13 +392,17 @@ def process_split(split_name, matched_pairs, config, output_base_dir):
             import traceback
             traceback.print_exc()
 
-    print(f"{split_name.upper()} 处理完成:")
-    print(f"  成功: {processed_count}")
+    print(f"\n{split_name.upper()} 处理完成:")
+    print(f"  原始样本: {len(matched_pairs)}")
+    print(f"  成功处理: {processed_count}")
     print(f"  失败: {error_count}")
+    print(f"  总变体数: {total_variants} (包括原图和增强变体)")
+    if apply_augmentation_flag and augmentation_multiplier > 1:
+        print(f"  增强倍数: {augmentation_multiplier}x")
     print(f"  标注验证错误: {validation_errors}")
     print(f"输出目录: {split_dir}")
 
-    return processed_count, error_count
+    return processed_count, error_count, total_variants
 
 
 def main():
@@ -421,31 +514,37 @@ def main():
         # 处理每个分割
         total_processed = 0
         total_errors = 0
+        total_output_images = 0  # 总输出图片数（包括所有变体）
         split_results = {}
 
         for split_name, split_pairs in splits.items():
             if split_name != 'all':
-                processed, errors = process_split(split_name, split_pairs, config, output_dir)
+                processed, errors, variants = process_split(split_name, split_pairs, config, output_dir)
                 total_processed += processed
                 total_errors += errors
+                total_output_images += variants
                 split_results[split_name] = {
-                    'total': len(split_pairs),
+                    'original_count': len(split_pairs),
                     'processed': processed,
-                    'errors': errors
+                    'errors': errors,
+                    'output_images': variants
                 }
 
         # 创建处理报告
+        augmentation_multiplier = config.get('augmentation_multiplier', 1)
         processing_report = {
             "version_id": metadata.get('version_id') or config.get('version_id'),
             "project_id": metadata.get('project_id') or config.get('project_id'),
             "snapshot_path": snapshot_path,
             "snapshot_mode": True,
             "dataset_split_enabled": True,
+            "augmentation_multiplier": augmentation_multiplier,
             "split_config": split_config,
             "split_results": split_results,
             "total_matched_pairs": len(matched_pairs),
             "total_processed": total_processed,
             "total_errors": total_errors,
+            "total_output_images": total_output_images,
             "preprocessing_steps": config.get('preprocessing', []),
             "augmentation_steps": config.get('augmentation', []),
             "processing_time": time.time() - start_time,
@@ -536,9 +635,15 @@ def main():
     print(f"\n=== 版本快照处理完成 ===")
     if split_config.get('enabled', False):
         print(f"划分模式: 启用")
+        augmentation_multiplier = config.get('augmentation_multiplier', 1)
+        if augmentation_multiplier > 1:
+            print(f"增强倍数: {augmentation_multiplier}x (仅训练集)")
         for split_name, result in processing_report.get('split_results', {}).items():
-            print(f"  {split_name.upper()}: {result['processed']}/{result['total']} 成功")
-        print(f"总计: 成功 {processing_report['total_processed']}, 失败 {processing_report['total_errors']}")
+            orig_count = result['original_count']
+            output_count = result['output_images']
+            print(f"  {split_name.upper()}: {orig_count} 张原始 → {output_count} 张输出 ({result['processed']}/{orig_count} 成功)")
+        print(f"总计: 原始 {len(matched_pairs)} 张, 输出 {total_output_images} 张")
+        print(f"处理状态: 成功 {total_processed}, 失败 {total_errors}")
     else:
         print(f"传统模式: 成功 {processing_report.get('processed_pairs', 0)}, 失败 {processing_report.get('failed_pairs', 0)}")
     print(f"处理耗时: {time.time() - start_time:.2f}秒")

@@ -39,17 +39,19 @@ def process_version_creation(version_id):
             "project_id": project_id,
             "preprocessing": version.preprocessing_config or [],
             "augmentation": version.augmentation_config or [],
+            "augmentation_multiplier": version.augmentation_multiplier,  # 添加增强倍数
             "split": split_config,
             "created_at": timezone.now().isoformat(),
         }
 
-        # 如果启用了数据集分割但没有指定随机种子，添加默认种子
+        # 如果启用了数据集分割但没有指定随机种子,添加默认种子
         if split_config.get("enabled") and "random_seed" not in split_config:
             config["random_seed"] = version_id  # 使用version_id作为种子确保可重现性
 
         logger.info(f"📋 处理配置内容:")
         logger.info(f"  - 预处理: {len(version.preprocessing_config or [])} 个步骤")
         logger.info(f"  - 数据增强: {len(version.augmentation_config or [])} 个步骤")
+        logger.info(f"  - 增强倍数: {version.augmentation_multiplier}x")
         logger.info(f"  - 数据集分割: {'启用' if split_config.get('enabled') else '禁用'}")
         if "random_seed" in config:
             logger.info(f"  - 随机种子: {config['random_seed']}")
@@ -247,7 +249,7 @@ def process_dataset_export(export_id, version_id, export_key=None):
             # 如果使用了持久化存储，立即清理临时管道
             if persistent_commit_id:
                 logger.info("✅ 使用持久化存储，立即启动临时管道清理")
-                # 可以在这里启动清理任务
+                start_job_async_or_sync(cleanup_export_pipelines, export_record.id)
             else:
                 logger.info("⏰ 使用临时存储，延迟清理将在下载后进行")
 
@@ -308,7 +310,7 @@ def cleanup_export_pipelines(export_id):
             version_id = version.id
             
             # 构建临时管道名称（与process_dataset_export中的命名保持一致）
-            ls_dataset_repo = f"ls-dataset-{project_id}-v{version_id}"
+            ls_dataset_repo = f"snapshot-processor-{project_id}-v{version_id}"
             format_converter_repo = f"format-converter-yolo-{project_id}-v{version_id}"
             
             logger.info(f"清理临时管道: {ls_dataset_repo}, {format_converter_repo}")
