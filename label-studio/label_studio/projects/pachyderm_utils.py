@@ -9,24 +9,57 @@ from pachyderm_sdk.api import pfs, pps
 
 logger = logging.getLogger(__name__)
 
-def get_pachyderm_client():
-    """Establishes a connection to the Pachyderm cluster."""
+def get_pachyderm_client(project_id=None):
+    """Establishes a connection to the Pachyderm cluster.
+
+    Args:
+        project_id: Project ID to load configuration from database. If None, uses default config.
+
+    Returns:
+        Pachyderm client instance
+    """
     try:
-        # Connects from a Docker container to a service on the host
+        # Default configuration
+        host = 'localhost'
+        port = 80
+        auth_token = 'dc0bfe2c249f45e893bda52b4483e742'
+        tls = False
+
+        # Try to load configuration from database if project_id is provided
+        if project_id is not None:
+            try:
+                from projects.models import Project
+                project = Project.objects.get(id=project_id)
+
+                if project.pachyderm_config:
+                    config = project.pachyderm_config
+                    host = config.get('host', host)
+                    port = config.get('port', port)
+                    auth_token = config.get('auth_token', auth_token)
+                    tls = config.get('tls', tls)
+                    logger.info(f"使用项目 {project_id} 的Pachyderm配置: {host}:{port}")
+                else:
+                    logger.info(f"项目 {project_id} 没有Pachyderm配置,使用默认配置")
+            except Exception as e:
+                logger.warning(f"加载项目 {project_id} 的Pachyderm配置失败,使用默认配置: {e}")
+        else:
+            logger.info("未提供project_id,使用默认Pachyderm配置")
+
+        # Connects to Pachyderm cluster
         client = pachyderm_sdk.Client(
-            host='localhost',
-            port=80,
-            auth_token='dc0bfe2c249f45e893bda52b4483e742',
+            host=host,
+            port=port,
+            auth_token=auth_token,
             root_certs=None,
             transaction_id=None,
-            tls=False
+            tls=tls
         )
         # A quick check to ensure the connection is valid
         client.get_version()
-        logger.info("Successfully connected to Pachyderm.")
+        logger.info(f"成功连接到Pachyderm: {host}:{port}")
         return client
     except Exception as e:
-        logger.error(f"Failed to connect to Pachyderm: {e}")
+        logger.error(f"连接Pachyderm失败: {e}")
         raise
 
 def ensure_repos_exist(client: pachyderm_sdk.Client, input_repo: str, output_repo: str):

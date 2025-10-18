@@ -1038,10 +1038,10 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
         
         # 生成导出唯一标识
         export_key = pachu.generate_export_key(project_pk, pk, export_format)
-        
+
         # 检查持久化仓库中是否已存在相同的导出结果
         try:
-            client = pachu.get_pachyderm_client()
+            client = pachu.get_pachyderm_client(project_pk)
             persistent_exists, persistent_commit_id, file_count = pachu.check_export_exists_in_persistent_repo(client, export_key)
             
             if persistent_exists and file_count > 0:
@@ -1275,10 +1275,10 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
         
         if not version.pachyderm_output_commit:
             return Response({'error': '版本尚未处理完成'}, status=400)
-            
+
         try:
             from . import pachyderm_utils as pachu
-            client = pachu.get_pachyderm_client()
+            client = pachu.get_pachyderm_client(version.project.id)
             
             # 创建 commit 对象
             from pachyderm_sdk.api import pfs
@@ -1353,11 +1353,11 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
                 logger.warning(f"获取路径 {path} 下的文件时出错: {e}")
                 
             return all_files
-        
+
         try:
             version = self.get_object()
-            client = get_pachyderm_client()
-            
+            client = get_pachyderm_client(version.project.id)
+
             logger.info(f"开始下载导出 - 管道: {pipeline_name}, commit: {commit_id}")
             
             # 下载Pachyderm仓库中的所有文件
@@ -1512,11 +1512,11 @@ class DatasetVersionViewSet(viewsets.ModelViewSet):
                 logger.warning(f"获取路径 {path} 下的文件时出错: {e}")
                 
             return all_files
-        
+
         try:
             version = self.get_object()
-            client = get_pachyderm_client()
-            
+            client = get_pachyderm_client(version.project.id)
+
             logger.info(f"开始从持久化仓库下载导出: {export_key}")
             
             # 连接持久化仓库

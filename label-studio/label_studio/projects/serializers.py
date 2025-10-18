@@ -250,6 +250,7 @@ class ProjectSerializer(FlexFieldsModelSerializer):
             'queue_total',
             'queue_done',
             'config_suitable_for_bulk_annotation',
+            'pachyderm_config',
         ]
 
     def validate_label_config(self, value):

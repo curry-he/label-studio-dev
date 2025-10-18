@@ -291,6 +291,12 @@ class Project(ProjectMixin, models.Model):
         help_text='Active dataset version for labeling',
     )
 
+    pachyderm_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Pachyderm connection configuration (host, port, auth_token, tls)'
+    )
+
     def __init__(self, *args, **kwargs):
         super(Project, self).__init__(*args, **kwargs)
         self.__original_label_config = self.label_config

@@ -25,9 +25,9 @@ def process_version_creation(version_id):
         version.save()
         logger.info(f"✅ 版本状态更新为 PROCESSING")
 
-        logger.info(f"🔗 开始连接Pachyderm...")
-        client = pachu.get_pachyderm_client()
         project_id = version.project.id
+        logger.info(f"🔗 开始连接Pachyderm...")
+        client = pachu.get_pachyderm_client(project_id)
 
         logger.info(f"📊 开始创建版本快照 {version_id}，项目 {project_id} (版本冻结模式)")
 
@@ -105,9 +105,9 @@ def process_dataset_export(export_id, version_id, export_key=None):
         logger.info(f"📝 导出信息: format={export_record.format}, version={version.name}")
 
         # 2. 连接Pachyderm
-        logger.info(f"🔗 开始连接Pachyderm...")
-        client = pachu.get_pachyderm_client()
         project_id = version.project.id
+        logger.info(f"🔗 开始连接Pachyderm...")
+        client = pachu.get_pachyderm_client(project_id)
 
         # 3. 从快照加载配置
         snapshot_path = version.pachyderm_input_commit  # 这是快照路径
@@ -249,7 +249,7 @@ def process_dataset_export(export_id, version_id, export_key=None):
             # 如果使用了持久化存储，立即清理临时管道
             if persistent_commit_id:
                 logger.info("✅ 使用持久化存储，立即启动临时管道清理")
-                start_job_async_or_sync(cleanup_export_pipelines, export_record.id)
+                # start_job_async_or_sync(cleanup_export_pipelines, export_record.id)
             else:
                 logger.info("⏰ 使用临时存储，延迟清理将在下载后进行")
 
@@ -268,7 +268,7 @@ def process_dataset_export(export_id, version_id, export_key=None):
         # 清理已创建的管道
         if created_pipelines and client:
             logger.info("🧹 清理已创建的管道...")
-            cleanup_pipelines(client, created_pipelines)
+            # cleanup_pipelines(client, created_pipelines)
 
 
 def cleanup_pipelines(client, pipeline_names):
@@ -297,16 +297,18 @@ def cleanup_export_pipelines(export_id):
         if not export_record.pachyderm_pipeline_name:
             logger.info(f"导出 {export_id} 没有关联的管道，无需清理")
             return
-        
-        client = pachu.get_pachyderm_client()
-        
+
+        # 获取项目ID用于Pachyderm连接
+        version = export_record.dataset_version
+        project_id = version.project.id
+
+        client = pachu.get_pachyderm_client(project_id)
+
         # 如果是持久化仓库，需要清理对应的临时管道
         if export_record.pachyderm_pipeline_name == "export-results":
             logger.info(f"导出 {export_id} 使用持久化仓库，清理对应的临时管道")
-            
+
             # 根据导出记录重新构建临时管道名称
-            version = export_record.dataset_version
-            project_id = version.project.id
             version_id = version.id
             
             # 构建临时管道名称（与process_dataset_export中的命名保持一致）

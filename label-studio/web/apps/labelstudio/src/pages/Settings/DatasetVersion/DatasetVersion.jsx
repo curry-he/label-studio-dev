@@ -293,6 +293,132 @@ const PreprocessingStepCard = ({ step, onEdit, onRemove }) => {
   );
 };
 
+// Component for Pachyderm configuration modal
+const PachydermConfigModal = ({ onCancel, onSave, currentConfig }) => {
+  const [host, setHost] = useState(currentConfig?.host || 'localhost');
+  const [port, setPort] = useState(currentConfig?.port || 80);
+  const [authToken, setAuthToken] = useState(currentConfig?.auth_token || '');
+  const [tls, setTls] = useState(currentConfig?.tls || false);
+  const [showToken, setShowToken] = useState(false);
+
+  const handleSave = () => {
+    onSave({
+      host,
+      port: parseInt(port),
+      auth_token: authToken,
+      tls
+    });
+  };
+
+  return (
+    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '20px',
+        borderBottom: '1px solid #e0e0e0'
+      }}>
+        <h2>Pachyderm Configuration</h2>
+        <Space>
+          <Button onClick={onCancel}>Cancel</Button>
+          <Button look="primary" onClick={handleSave}>
+            Save
+          </Button>
+        </Space>
+      </div>
+      <div style={{ flex: 1, overflow: 'auto', padding: '20px' }}>
+        <p style={{ marginBottom: '20px', color: '#666' }}>
+          Configure the connection settings for your Pachyderm cluster. These settings will be used for data pipeline processing.
+        </p>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+            Host:
+          </label>
+          <input
+            type="text"
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+            placeholder="localhost"
+            style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+          />
+        </div>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+            Port:
+          </label>
+          <input
+            type="number"
+            value={port}
+            onChange={(e) => setPort(e.target.value)}
+            placeholder="80"
+            style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+          />
+        </div>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+            Auth Token:
+          </label>
+          <div style={{ position: 'relative' }}>
+            <input
+              type={showToken ? "text" : "password"}
+              value={authToken}
+              onChange={(e) => setAuthToken(e.target.value)}
+              placeholder="Enter your auth token"
+              style={{ width: '100%', padding: '8px', paddingRight: '80px', boxSizing: 'border-box' }}
+            />
+            <button
+              onClick={() => setShowToken(!showToken)}
+              style={{
+                position: 'absolute',
+                right: '8px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                border: 'none',
+                background: 'transparent',
+                cursor: 'pointer',
+                color: '#1976d2',
+                fontSize: '12px'
+              }}
+            >
+              {showToken ? 'Hide' : 'Show'}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={tls}
+              onChange={(e) => setTls(e.target.checked)}
+              style={{ marginRight: '10px' }}
+            />
+            <span style={{ fontWeight: 'bold' }}>Enable TLS</span>
+          </label>
+          <p style={{ margin: '5px 0 0 30px', fontSize: '14px', color: '#666' }}>
+            Use secure TLS connection to Pachyderm cluster
+          </p>
+        </div>
+
+        <div style={{
+          padding: '15px',
+          backgroundColor: '#f0f7ff',
+          border: '1px solid #b3d9ff',
+          borderRadius: '4px'
+        }}>
+          <p style={{ margin: 0, fontSize: '14px', color: '#004085' }}>
+            <strong>Note:</strong> Changes to Pachyderm configuration will take effect for new version creations and exports.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const AddMoreImagesModal = ({ onCancel, onFinish, pageProps, uploading, project }) => {
   const [sample, setSample] = useState(null);
 
@@ -1142,17 +1268,52 @@ export const DatasetVersion = () => {
     }
   };
 
+  const handlePachydermSettings = () => {
+    if (!project) return;
+
+    const modalRef = modal({
+      title: "Pachyderm Configuration",
+      body: (
+        <PachydermConfigModal
+          currentConfig={project.pachyderm_config || {}}
+          onCancel={() => modalRef.close()}
+          onSave={async (config) => {
+            try {
+              await api.callApi("updateProject", {
+                params: { pk: contextProject.id },
+                body: { pachyderm_config: config }
+              });
+              // Refresh project data
+              await fetchProjectAndVersions(contextProject.id);
+              modalRef.close();
+            } catch (error) {
+              console.error("Failed to update Pachyderm configuration:", error);
+              alert("Failed to save Pachyderm configuration: " + error.message);
+            }
+          }}
+        />
+      ),
+      style: { width: "600px", height: "auto", maxWidth: "90vw" },
+      bare: true,
+    });
+  };
+
   return (
     <Block name="dataset-version">
       <Elem name="header">
         <h1>Versions</h1>
-        <Button
-          onClick={handleCreateNewVersion}
-          primary
-          disabled={isLoadingProject}
-        >
-          {isLoadingProject ? "Loading..." : "Create New Version"}
-        </Button>
+        <Space>
+          <Button onClick={handlePachydermSettings} disabled={!project}>
+            Pachyderm Settings
+          </Button>
+          <Button
+            onClick={handleCreateNewVersion}
+            primary
+            disabled={isLoadingProject}
+          >
+            {isLoadingProject ? "Loading..." : "Create New Version"}
+          </Button>
+        </Space>
       </Elem>
       <Elem name="container">
         <Elem name="versions-list">
