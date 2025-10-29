@@ -99,7 +99,7 @@ module.exports = composePlugins(
             ? `${FRONTEND_HOSTNAME}/react-app/`
             : process.env.MODE === "standalone-playground"
               ? "/playground-assets/"
-              : "auto",
+              : "/react-app/",
         scriptType: "text/javascript",
       };
 
